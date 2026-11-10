@@ -53,6 +53,9 @@ class Settings:
     # 요청 처리 검색 방식: bm25 | dense | hybrid.
     # 공개 세트 R@1: bm25 0.891, dense 0.689, hybrid(RRF) 0.824 → 기본 bm25.
     retrieval_mode: str
+    # few-shot 예시 풀(배포 자료 파일만). 쉼표로 구분.
+    fewshot_files: tuple
+    fewshot_k: int
 
 
 def load_settings() -> Settings:
@@ -81,4 +84,7 @@ def load_settings() -> Settings:
         query_embed_timeout_s=_float("QUERY_EMBED_TIMEOUT_S", 3.0),
         use_dense=os.environ.get("USE_DENSE", "1") != "0",
         retrieval_mode=os.environ.get("RETRIEVAL_MODE", "bm25"),
+        fewshot_files=tuple(Path(p.strip()) for p in os.environ.get(
+            "FEWSHOT_FILES", f"{ROOT / 'public/tutor.jsonl'},{ROOT / 'public/guard.jsonl'}").split(",") if p.strip()),
+        fewshot_k=int(_float("FEWSHOT_K", 6)),
     )

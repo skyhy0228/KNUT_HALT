@@ -8,6 +8,7 @@ import time
 from dataclasses import dataclass
 
 from .config import Settings
+from .examples import ExamplePool
 from .kb import load_kb
 from .llm import LLM
 from .retrieval import Retriever, load_cached_embeddings, save_cached_embeddings
@@ -20,6 +21,7 @@ class AppState:
     settings: Settings
     retriever: Retriever
     llm: LLM
+    examples: ExamplePool
 
 
 async def build_state(settings: Settings) -> AppState:
@@ -45,5 +47,6 @@ async def build_state(settings: Settings) -> AppState:
             retriever.set_embeddings(emb)
             log.info("kb_embeddings_ready source=%s shape=%s", source, tuple(emb.shape))
 
+    examples = ExamplePool(settings.fewshot_files)
     log.info("startup_ready dense=%s elapsed_ms=%d", retriever.dense_ready, (time.perf_counter() - t0) * 1000)
-    return AppState(settings, retriever, llm)
+    return AppState(settings, retriever, llm, examples)
