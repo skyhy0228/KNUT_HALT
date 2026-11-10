@@ -1,6 +1,12 @@
 import os
 import secrets
+from pathlib import Path
 from typing import Dict, List, Optional
+
+from dotenv import load_dotenv
+
+# .env(API 키, TEAM_TOKEN)를 읽는다. 런박스에 이미 있는 환경변수(주소·모델명)는 덮어쓰지 않는다.
+load_dotenv(Path(__file__).resolve().parent / ".env", override=False)
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from openai import AsyncOpenAI
