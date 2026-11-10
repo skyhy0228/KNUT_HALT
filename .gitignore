@@ -19,3 +19,6 @@ logs/
 .vscode/
 .idea/
 .DS_Store
+
+# 서버가 만드는 KB 임베딩 캐시(시작 시 재생성 가능)
+cache/
