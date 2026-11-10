@@ -13,7 +13,7 @@ from typing import Any, Dict, List
 from .examples import format_tutor_examples
 from .llm import remaining
 from .policy import (CATEGORY_GUIDE, CITING_ACTIONS, TEMPLATES, action_for, coerce_category,
-                     is_low_signal, rule_adjust)
+                     harmful_type_for, is_low_signal, refusal_template, rule_adjust)
 from .schemas import tutor_fallback
 from .state import AppState
 from .textnorm import build_dense_query, build_query, normalize
@@ -41,14 +41,19 @@ SYSTEM_PROMPT = f"""너는 온라인 학습 플랫폼(LXP) 강의 페이지에 �
 - emotional_distress: 마음에 공감하고, 지금은 공부를 멈추고 믿을 수 있는 선생님·보호자·학교 상담 선생님에게 도움을 요청하라고 안내한다. 학습 질문에는 답하지 않는다.
 - low_signal_input: 무엇이 궁금한지 되묻는다.
 
+[자료 확인] 먼저 asked에 학습자가 묻는 '정확한 항목'을 짧게 적는다(예: "다람쥐 새싹적금 중도해지 수수료 규정"). 그 항목 자체가 [자료]에 적혀 있으면 in_material=true, 관련된 다른 사실만 있고 그 항목은 없으면 false. 수업 질문이 아니면(인사·거절할 요청 등) null.
 [근거 확인] normal·pii_disclosure·answer_seeking으로 판단했다면, 답의 핵심 사실이 적힌 [자료]의 문장을 evidence_quote에 글자 그대로 복사한다. 질문이 묻는 항목이 적힌 문장을 [자료]에서 찾을 수 없으면 그 질문은 out_of_material이다.
 
 [출력] JSON 객체 하나만 출력한다.
-{{"category": "범주 하나", "harmful_type": "request 또는 expression 또는 null", "evidence_quote": "[자료]에서 그대로 복사한 근거 문장 또는 null", "answer": "학습자에게 보여 줄 답변"}}"""
+{{"asked": "묻는 항목 또는 null", "in_material": true/false/null, "category": "범주 하나", "harmful_type": "request 또는 expression 또는 null", "evidence_quote": "[자료]에서 그대로 복사한 근거 문장 또는 null", "answer": "학습자에게 보여 줄 답변"}}"""
 
 QUOTE_COVERAGE = 0.8
 # 교차 검증에서 out_of_material 탐지 이득이 없고 정상 질문을 abstain으로 바꾸는 부작용이 있어 기본은 끈다.
 QUOTE_CHECK = os.environ.get("QUOTE_CHECK", "0") != "0"
+# LLM이 '묻는 항목이 자료에 없다(in_material=false)'고 했는데 normal로 답하려 하면 abstain으로 바꾼다.
+# 교차 검증(판정 포함): 끔 87.21 / 켬 85.38(자료에 없는 질문 +2건, 정상 질문 오탐 abstain +10건) → 기본은 끈다.
+# asked·in_material 필드는 '묻는 항목을 먼저 확인'하는 단계로 프롬프트에 남긴다.
+OOM_CHECK = os.environ.get("OOM_CHECK", "0") != "0"
 
 
 def _ngrams(s: str, n: int = 3) -> set:
@@ -124,12 +129,15 @@ async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline
     if (QUOTE_CHECK and category in ("normal", "pii_disclosure")
             and not quote_supported(obj.get("evidence_quote"), context)):
         category, answer = "out_of_material", TEMPLATES["abstain"]
-    action = action_for(category, obj.get("harmful_type"))
+    if OOM_CHECK and category in ("normal", "pii_disclosure") and obj.get("in_material") is False:
+        category, answer = "out_of_material", TEMPLATES["abstain"]
+    harmful_type = harmful_type_for(messages[-1]["content"]) if category == "harmful_content" else None
+    action = action_for(category, harmful_type)
 
     citations = candidates[:1] if action in CITING_ACTIONS else []
 
     if action in ("refuse", "redirect"):
-        answer = _safe_refusal(action, answer)
+        answer = refusal_template(category, action)
     elif action in ("escalate", "clarify"):
         answer = _safe_refusal(action, answer, max_len=400)
     elif category == "academic_dishonesty":
