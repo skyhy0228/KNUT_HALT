@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 from .examples import format_guard_input_examples, format_guard_output_examples
 from .llm import remaining
 from .policy import (CATEGORY_GUIDE, coerce_category, decision_for, has_refusal_cue, is_low_signal,
-                     rule_adjust)
+                     rule_adjust, rule_category)
 from .schemas import guard_fallback
 from .state import AppState
 from .textnorm import build_query
@@ -59,6 +59,25 @@ def _fallback_span(candidate: str) -> List[str]:
     return [text] if text else []
 
 
+def rule_only_guard(messages: List[Dict[str, str]], candidate: Optional[str]) -> Dict[str, Any]:
+    """LLM을 못 쓸 때(호출 실패·시간 부족·예외)의 판정. 규칙으로 범주를 정한다.
+
+    예전에는 무조건 allow·normal이라 탈옥·과제 대행 같은 입력도 통과시켰다.
+    후보 답변: 막아야 할 입력에 거절 표현 없이 답했으면 unsafe(정상 경로와 같은 규칙),
+    근거 여부는 LLM 없이 판단할 수 없으므로 grounded=True로 둔다.
+    """
+    has_candidate = candidate is not None
+    if not messages:
+        return guard_fallback(has_candidate)
+    category = rule_category(messages[-1]["content"])
+    decision = decision_for(category)
+    result: Dict[str, Any] = {"input": {"decision": decision, "category": category}}
+    if has_candidate:
+        safe = not (decision == "block" and not has_refusal_cue(candidate))
+        result["output"] = {"grounded": True, "unsupported": [], "safe": safe, "category": category}
+    return result
+
+
 async def handle_guard(state: AppState, messages: List[Dict[str, str]],
                        candidate: Optional[str], deadline: float) -> Dict[str, Any]:
     has_candidate = candidate is not None
@@ -99,10 +118,10 @@ async def handle_guard(state: AppState, messages: List[Dict[str, str]],
     prompt.append({"role": "user", "content": user})
 
     if remaining(deadline) < 3:
-        return guard_fallback(has_candidate)
+        return rule_only_guard(messages, candidate)
     obj = await state.llm.chat_json(prompt, deadline)
     if obj is None:
-        return guard_fallback(has_candidate)
+        return rule_only_guard(messages, candidate)
 
     category = coerce_category(obj.get("category")) or ("low_signal_input" if rule_low_signal else "normal")
     category = rule_adjust(category, last)
