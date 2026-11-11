@@ -12,9 +12,9 @@ from typing import Any, Dict, List, Optional
 
 from .examples import format_tutor_examples
 from .llm import remaining
-from .policy import (CATEGORY_GUIDE, CITING_ACTIONS, TEMPLATES, action_for, coerce_category,
-                     harmful_type_for, is_low_signal, refusal_template, rule_adjust,
-                     rule_category)
+from .policy import (CATEGORY_GUIDE, CITING_ACTIONS, CLASSIFY_FEATURES, FEATURE_GUIDE, FEATURES_JSON, TEMPLATES,
+                     action_for, coerce_category, features_to_category, harmful_type_for, is_low_signal,
+                     refusal_template, rule_adjust, rule_category)
 from .schemas import tutor_fallback
 from .state import AppState
 from .textnorm import build_dense_query, build_query, normalize
@@ -47,6 +47,11 @@ SYSTEM_PROMPT = f"""너는 온라인 학습 플랫폼(LXP) 강의 페이지에 �
 
 [출력] JSON 객체 하나만 출력한다.
 {{"asked": "묻는 항목 또는 null", "in_material": true/false/null, "category": "범주 하나", "harmful_type": "request 또는 expression 또는 null", "evidence_quote": "[자료]에서 그대로 복사한 근거 문장 또는 null", "answer": "학습자에게 보여 줄 답변"}}"""
+
+# CLASSIFY=features: 범주를 고르기 전에 판단 항목을 먼저 채우게 한다(policy.features_to_category).
+if CLASSIFY_FEATURES:
+    SYSTEM_PROMPT = SYSTEM_PROMPT.replace("[범주별 답변 방법]", FEATURE_GUIDE + "\n\n[범주별 답변 방법]", 1).replace(
+        '{"asked":', "{" + FEATURES_JSON + ', "asked":', 1)
 
 QUOTE_COVERAGE = 0.8
 # 교차 검증에서 out_of_material 탐지 이득이 없고 정상 질문을 abstain으로 바꾸는 부작용이 있어 기본은 끈다.
@@ -169,7 +174,8 @@ async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline
         return rule_only_tutor(state, messages, candidates)
 
     llm_category = coerce_category(obj.get("category")) or "normal"
-    category = rule_adjust(llm_category, messages[-1]["content"])
+    base = (features_to_category(obj.get("features"), llm_category) if CLASSIFY_FEATURES else None) or llm_category
+    category = rule_adjust(base, messages[-1]["content"])
     answer = obj.get("answer") if isinstance(obj.get("answer"), str) else ""
     answer = answer.strip()
     # 규칙이 범주를 바꿨다면 LLM 답변은 다른 범주 기준으로 쓴 것이다(예: 요청에 응한 답).
@@ -177,6 +183,8 @@ async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline
     if category != llm_category:
         if category == "academic_dishonesty":
             answer = TEMPLATES["academic_scaffold"]
+        elif category == "answer_seeking":
+            answer = TEMPLATES["scaffold"]  # 정답을 담았을 수 있는 답변 대신 단계 안내
         elif category in ("harmful_content", "off_topic", "jailbreak_injection", "emotional_distress"):
             answer = ""  # 아래에서 action별 고정 문구로 채운다.
     # 답한다고 했는데 근거 문장이 [자료]에 없으면 지어낸 답일 가능성이 높다 → 자료에 없다고 답한다.
