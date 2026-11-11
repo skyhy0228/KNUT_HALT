@@ -6,7 +6,8 @@
 - 색인·임베딩은 서버 시작 시 준비한다(첫 요청 전에 완료).
 - 로그에는 경로·상태 코드·소요 시간·바이트 길이만 남긴다. 요청·답변 본문은 저장하지 않는다(SPEC §8).
 
-실행: ./run.sh  (또는 python3 -m uvicorn server:app --host 0.0.0.0 --port 8000 --no-access-log)
+실행: ./run.sh  (또는 python3 -m uvicorn server:app --host 0.0.0.0 --port 8228 --no-access-log)
+제출 서버 포트는 8228이다(run.sh 기본값). 제출 주소의 /proxy/<포트>와 맞춘다.
 """
 import asyncio
 import json

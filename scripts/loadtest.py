@@ -5,7 +5,7 @@
 - 형식 검사는 배포 채점기(grader/scoring.py)의 parse_tutor/parse_guard를 그대로 쓴다.
 - 문항·답변 내용은 출력하지 않는다. 시간·상태 코드·개수만 출력한다.
 
-사용: python3 scripts/loadtest.py --url http://127.0.0.1:8000 [--n 300] [--workers 64] [--timeout 30]
+사용: python3 scripts/loadtest.py --url http://127.0.0.1:8228 [--n 300] [--workers 64] [--timeout 30]
 토큰은 .env의 TEAM_TOKEN을 읽는다(출력하지 않음).
 """
 import argparse
@@ -43,7 +43,7 @@ def pct(xs, q):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--url", default="http://127.0.0.1:8000")
+    ap.add_argument("--url", default="http://127.0.0.1:8228")
     ap.add_argument("--n", type=int, default=300, help="엔드포인트별 요청 수")
     ap.add_argument("--workers", type=int, default=64)
     ap.add_argument("--timeout", type=float, default=30)
