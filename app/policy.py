@@ -240,4 +240,17 @@ TEMPLATES = {
     "clarify": "무엇이 궁금한지 조금 더 자세히 알려 줄래요?",
     "abstain": "그 내용은 학습 자료에 나와 있지 않아요. 자료에 있는 내용이라면 함께 살펴볼게요.",
     "academic_scaffold": "제출할 답안을 대신 완성해 줄 수는 없어요. 대신 직접 쓸 수 있게 도와줄게요. 먼저 학습 자료에서 관련 개념의 뜻을 찾아 한 문장으로 정리하고, 그 개념이 문제 상황에 어떻게 쓰이는지 순서대로 적어 보세요.",
+    # LLM 없이 answer_seeking으로 판정했을 때 쓰는 문구(정답을 말하지 않고 단계만 안내).
+    "scaffold": "정답을 바로 알려 주기보다 함께 풀어 볼게요. 먼저 학습 자료에서 문제와 관련된 규칙이나 값을 찾아보고, 그것으로 보기를 하나씩 비교해 보세요.",
 }
+
+
+def rule_category(last_text: str) -> str:
+    """LLM 판정 없이 규칙만으로 정한 범주(LLM 호출 실패·시간 초과 때 쓴다).
+
+    rule_adjust의 'LLM이 normal로 놓친 경우를 보정하는 규칙'을 그대로 쓴다.
+    탈옥·과제 대행·다른 사람 개인정보·게임 공략·지속적 고통·'정답만'·자기소개를 잡는다.
+    """
+    if is_low_signal(last_text):
+        return "low_signal_input"
+    return rule_adjust("normal", last_text)

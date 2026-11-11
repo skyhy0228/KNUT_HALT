@@ -19,11 +19,11 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from app.config import load_settings
-from app.guard import handle_guard
+from app.guard import handle_guard, rule_only_guard
 from app.schemas import (guard_fallback, parse_candidate, parse_messages, sanitize_guard,
                          sanitize_tutor, tutor_fallback)
 from app.state import build_state
-from app.tutor import handle_tutor
+from app.tutor import handle_tutor, rule_only_tutor
 
 log = logging.getLogger("halt")
 if not log.handlers:
@@ -83,6 +83,23 @@ async def _read_payload(request: Request):
         return None
 
 
+def _safe_rule_tutor(request: Request, messages):
+    """LLM 경로가 실패했을 때 규칙만으로 답한다. 규칙 처리도 실패하면 기존 대체 응답."""
+    try:
+        return rule_only_tutor(request.app.state.ctx, messages)
+    except Exception as e:
+        log.warning("tutor_rule_fallback_error type=%s", type(e).__name__)
+        return tutor_fallback()
+
+
+def _safe_rule_guard(messages, candidate):
+    try:
+        return rule_only_guard(messages, candidate)
+    except Exception as e:
+        log.warning("guard_rule_fallback_error type=%s", type(e).__name__)
+        return guard_fallback(candidate is not None)
+
+
 def _deadline() -> float:
     return asyncio.get_running_loop().time() + settings.request_budget_s
 
@@ -99,10 +116,10 @@ async def tutor(request: Request):
                                         timeout=settings.request_budget_s)
     except asyncio.TimeoutError:
         log.warning("tutor_budget_exceeded")
-        result = tutor_fallback()
+        result = _safe_rule_tutor(request, messages)
     except Exception as e:
         log.warning("tutor_error type=%s", type(e).__name__)
-        result = tutor_fallback()
+        result = _safe_rule_tutor(request, messages)
     return JSONResponse(sanitize_tutor(result))
 
 
@@ -120,10 +137,10 @@ async def guard(request: Request):
                                         timeout=settings.request_budget_s)
     except asyncio.TimeoutError:
         log.warning("guard_budget_exceeded")
-        result = guard_fallback(has_candidate)
+        result = _safe_rule_guard(messages, candidate)
     except Exception as e:
         log.warning("guard_error type=%s", type(e).__name__)
-        result = guard_fallback(has_candidate)
+        result = _safe_rule_guard(messages, candidate)
     return JSONResponse(sanitize_guard(result, has_candidate))
 
 

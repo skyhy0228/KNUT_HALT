@@ -8,12 +8,13 @@
 """
 import os
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from .examples import format_tutor_examples
 from .llm import remaining
 from .policy import (CATEGORY_GUIDE, CITING_ACTIONS, TEMPLATES, action_for, coerce_category,
-                     harmful_type_for, is_low_signal, refusal_template, rule_adjust)
+                     harmful_type_for, is_low_signal, refusal_template, rule_adjust,
+                     rule_category)
 from .schemas import tutor_fallback
 from .state import AppState
 from .textnorm import build_dense_query, build_query, normalize
@@ -109,6 +110,35 @@ def _safe_refusal(action: str, answer: str, max_len: int = 200) -> str:
     return answer
 
 
+def rule_only_tutor(state: AppState, messages: List[Dict[str, str]], candidates: Optional[List[str]] = None) -> Dict[str, Any]:
+    """LLM을 못 쓸 때(호출 실패·시간 부족·예외)의 응답. 규칙으로 범주를 정하고 고정 문구로 답한다.
+
+    예전에는 무조건 action=answer로 답해, 탈옥·유해 요청도 '답변'으로 처리됐다.
+    LLM이 없으니 정상 질문의 실제 답은 못 만들지만, 막아야 할 요청은 막고 action은 맞힌다.
+    """
+    if not messages:
+        return {"answer": TEMPLATES["clarify"], "action": "clarify", "citations": []}
+    last = messages[-1]["content"]
+    if candidates is None:
+        try:
+            candidates = [sid for sid, _ in state.retriever.search(build_query(messages), None, k=1, mode="bm25")]
+        except Exception:
+            candidates = []
+    category = rule_category(last)
+    harmful_type = harmful_type_for(last) if category == "harmful_content" else None
+    action = action_for(category, harmful_type)
+    citations = candidates[:1] if action in CITING_ACTIONS else []
+    if action in ("refuse", "redirect"):
+        answer = refusal_template(category, action)
+    elif category == "academic_dishonesty":
+        answer = TEMPLATES["academic_scaffold"]
+    elif action in TEMPLATES:  # scaffold·escalate·clarify·abstain
+        answer = TEMPLATES[action]
+    else:  # answer: 실제 답은 못 만들므로 기존 대체 문구
+        answer = tutor_fallback()["answer"]
+    return {"answer": answer, "action": action, "citations": citations}
+
+
 async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline: float) -> Dict[str, Any]:
     if not messages:
         return {"answer": TEMPLATES["clarify"], "action": "clarify", "citations": []}
@@ -122,7 +152,7 @@ async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline
     ranked = state.retriever.search(build_query(messages), qvec, k=TOP_K, mode=mode)
     candidates = [sid for sid, _ in ranked]
     if remaining(deadline) < 3:
-        return tutor_fallback(candidates[:1])
+        return rule_only_tutor(state, messages, candidates)
 
     examples = state.examples.search(messages, state.settings.fewshot_k)
     context = _context(state, candidates)
@@ -136,7 +166,7 @@ async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline
 
     obj = await state.llm.chat_json(prompt, deadline)
     if obj is None:
-        return tutor_fallback(candidates[:1])
+        return rule_only_tutor(state, messages, candidates)
 
     llm_category = coerce_category(obj.get("category")) or "normal"
     category = rule_adjust(llm_category, messages[-1]["content"])
