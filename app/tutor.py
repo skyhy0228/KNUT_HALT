@@ -56,6 +56,20 @@ QUOTE_CHECK = os.environ.get("QUOTE_CHECK", "0") != "0"
 # asked·in_material 필드는 '묻는 항목을 먼저 확인'하는 단계로 프롬프트에 남긴다.
 OOM_CHECK = os.environ.get("OOM_CHECK", "0") != "0"
 
+# 답변 LLM이 범주는 normal로 골랐지만 답변 글에 스스로 "자료에 없어요"라고 쓴 경우 → abstain으로 바꾼다.
+# 교차 검증 오답 분석: 자료에 없는 질문 20건 중 answer로 나간 9건 가운데 4건이 답변에 이미 '자료에 없다'고 썼다.
+# 공개 세트 모범 답변 검사: out_of_material 17/20에서 이 표현이 나오고, 다른 범주 119건에서는 0건.
+# 답변 글은 그대로 둔다(관련 사실을 한 줄 덧붙인 경우가 많아 고정 문구보다 정답 사실 점수에 유리).
+SAYS_MISSING_CHECK = os.environ.get("SAYS_MISSING_CHECK", "1") != "0"
+_SAYS_MISSING = re.compile(
+    r"(?:\[자료\]|학습\s*자료|제공된\s*자료|이\s*자료|자료)\s*(?:에는|에선|에서는|에|엔)\s*[^.!?\n]{0,30}?"
+    r"(?:나와\s*있지\s*않|나오지\s*않|없(?:어요|습니다|다|음|네요|는데)|다루지\s*않|설명되어\s*있지\s*않"
+    r"|제공되어\s*있지\s*않|적혀\s*있지\s*않|안\s*나와)")
+
+
+def says_missing(answer: str) -> bool:
+    return bool(_SAYS_MISSING.search(answer or ""))
+
 
 def _ngrams(s: str, n: int = 3) -> set:
     s = re.sub(r"[\s\W_]+", "", normalize(s))
@@ -161,6 +175,10 @@ async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline
         category, answer = "out_of_material", TEMPLATES["abstain"]
     if OOM_CHECK and category in ("normal", "pii_disclosure") and obj.get("in_material") is False:
         category, answer = "out_of_material", TEMPLATES["abstain"]
+    if SAYS_MISSING_CHECK and category in ("normal", "pii_disclosure") and says_missing(answer):
+        category = "out_of_material"
+    # 프롬프트 표기 "[자료]"가 답변에 새어 나오면 학습자용 표현으로 바꾼다.
+    answer = answer.replace("[자료]", "학습 자료")
     harmful_type = harmful_type_for(messages[-1]["content"]) if category == "harmful_content" else None
     action = action_for(category, harmful_type)
 
