@@ -49,7 +49,7 @@ CATEGORY_GUIDE = """[범주 정의] 학습자의 '마지막 발화'를 기준으
 
 # LLM이 normal로 놓친 경우만 보정하는 규칙(공개 세트 라벨 분석에서 일반화한 표현).
 _PII_SELF = re.compile(
-    r"(?:^|[\s,.!?])(?:나는|난|저는|전|제\s*이름은|내\s*이름은)\s*[가-힣a-z]{1,12}?\s*(?:중(?:학교)?\s*[1-3]\s*학년\s*)?[가-힣a-z]{0,6}(?:이야|야|예요|이에요|입니다|이고|고)(?=[\s,.!?]|$)"
+    r"(?:^|[\s,.!?])(?:나는|난(?=\s)|저는|전(?=\s)|제\s*이름은|내\s*이름은)\s*[가-힣a-z]{1,12}?\s*(?:중(?:학교)?\s*[1-3]\s*학년\s*)?[가-힣a-z]{0,6}(?:이야|야|예요|이에요|입니다|이고|고)(?=[\s,.!?]|$)"
     r"|[가-힣]{1,8}\s*중(?:학교)?\s*[1-3]\s*학년")
 _ANSWER_ONLY = re.compile(r"정답만|답만\s*(?:알려|골라|말해|줘)|설명\s*(?:은\s*)?(?:없이|말고|빼고)[^\n]{0,20}(?:정답|답)|정답\s*(?:만\s*)?골라")
 _ACADEMIC = re.compile(
@@ -60,8 +60,24 @@ _ACADEMIC = re.compile(
 _OFF_TOPIC = re.compile(
     r"(?:게임|game|겜)[^\n]{0,25}(?:공략|이기는|이길|랭크|전략|아이템)|공략|(?:광고|홍보)\s*(?:문구|글|카피)"
     r"|표어|슬로건|slogan|catchy|short\s*copy|그림\s*(?:을\s*)?그려|그려\s*줘")
+# 사람을 속일 사기·사칭 문자·대화를 '써 달라는' 요청(공개 세트 5/5 harmful_content).
+# 작성 대상 명사 바로 뒤에 작성 동사가 와야 한다("~대화의 위험성을 써 줘"는 정상 질문).
+_SCAM_WRITE = re.compile(
+    r"(?:돈을?\s*(?:더\s*)?보내게|송금하게|입금하게|인증\s*(?:번호|정보)를?\s*(?:보내|받아)|은행인\s*척|은행에서\s*보낸\s*척"
+    r"|사칭|받아내|받아낼|속여)[^\n]{0,40}?(?:대화|문자|문구|글|메시지)(?:를|을|로)?\s*(?:한\s*통\s*)?(?:은\s*)?"
+    r"(?:써|만들|작성|정리|완성)")
+# 광고·홍보 문구 제작 요청. 외우기·공부용이거나 '규칙을 광고 문구처럼' 정리하는 것은 제외(공개 세트 5/5 off_topic).
+_AD_COPY = re.compile(
+    r"(?:광\s*고|홍\s*보)\s*(?:하는\s*|용\s*)?(?:문구|글|카피|copy)[^\n]{0,20}(?:만들|써\s*(?:줘|주)|작성)"
+    r"|(?:홍보용|광고용)[^\n]{0,30}(?:써|만들|작성)|(?:catchy|short\s*copy|slogan|슬로건|표어)[^\n]{0,30}(?:써|만들|작성)")
+# 튜터·사람을 직접 모욕하는 말(인용해서 묻는 경우 제외, 공개 세트 3/3 harmful_content).
+_INSULT = re.compile(r"존재할\s*가치|쓸모\s*없|멍청|바보|꺼져|한심")
+_AD_LEARN = re.compile(r"외우게|기억하|공부|연습|이해|규칙을[^\n]{0,30}처럼|처럼\s*만들")
+# 학습자가 '자기가 쓴' 답안·코드의 설명을 구하는 것은 대행 요청이 아님(공개 세트: 해당 표현 3건 중 대행 0건).
+_OWN_WORK = re.compile(r"(?:제가|내가|내)\s*(?:쓴|작성한|만든)")
 _GAME = re.compile(r"(?:게임|game|겜)[^\n]{0,25}(?:공략|이기는|이길|랭크|전략|아이템)|공략")
-_HARM_QUOTED = re.compile(r"(?:이)?라는\s*(?:문장|댓글|차별|문구|표현|말|글)|(?:문장|댓글|문구|표현)을\s*(?:분류|정리|살펴|검토)")
+_HARM_QUOTED = re.compile(r"(?:라는|다는)\s*(?:가상(?:의)?\s*)?(?:문장|댓글|차별|문구|표현|말|글)"
+                          r"|(?:문장|댓글|문구|표현)을\s*(?:분류|정리|살펴|검토)")
 _OTHER_PII = re.compile(
     r"(?:친구|다른\s*학생|다른\s*사람|남의|그\s*애|걔)[^\n]{0,40}"
     r"(?:이름|학교|주소|연락처|전화\s*번호|번호|통장|내역|사는\s*곳)[^\n]{0,30}"
@@ -130,14 +146,22 @@ def rule_adjust(category: str, last_text: str) -> str:
     # 비하 문장을 '~라는 문장/댓글'로 인용해 분류·정리법을 묻는 것은 정상 질문(공개 세트 4/4 normal).
     if category == "harmful_content" and _HARM_QUOTED.search(t) and not _HARM_REQUEST.search(t):
         category = "normal"
+    if category in ("normal", "out_of_material", "answer_seeking", "pii_disclosure", "off_topic") and _SCAM_WRITE.search(t):
+        return "harmful_content"
+    if category == "academic_dishonesty" and _OWN_WORK.search(t):
+        category = "normal"
     # 게임 공략·이기는 법은 수업 소재를 섞어도 off_topic(공개 세트: normal 오탐 0건).
     if category == "normal" and _GAME.search(t):
         return "off_topic"
+    if category in ("normal", "out_of_material", "pii_disclosure") and _AD_COPY.search(t) and not _AD_LEARN.search(t):
+        return "off_topic"
+    if category == "normal" and _INSULT.search(t) and not _HARM_QUOTED.search(t):
+        return "harmful_content"
     if category == "out_of_material" and _OFF_TOPIC.search(t):
         return "off_topic"
     if category in ("normal", "answer_seeking", "out_of_material", "pii_disclosure") and _OTHER_PII.search(t):
         return "harmful_content"
-    if category in ("normal", "answer_seeking") and _ACADEMIC.search(t):
+    if category in ("normal", "answer_seeking") and _ACADEMIC.search(t) and not _OWN_WORK.search(t):
         return "academic_dishonesty"
     if category == "emotional_distress" and not _DISTRESS.search(t):
         return "normal"
@@ -168,7 +192,8 @@ def coerce_category(value) -> Optional[str]:
 
 
 # harmful_content 중 방법·결과물을 '해 달라는' 요청 표현(공개 세트 16/16: 있으면 refuse, 없으면 비하 발언 redirect).
-_HARM_REQUEST = re.compile(r"알려|만들|써\s*(?:줘|주|달)|설명해|방법|알아내|받아내|찾아\s*(?:줘|주|내)|어떻게\s*(?:하|해)")
+_HARM_REQUEST = re.compile(r"알려|만들|써\s*(?:줘|주|달)|설명해|방법|알아내|받아내|찾아\s*(?:줘|주|내)|어떻게\s*(?:하|해)"
+                           r"|정리해\s*(?:줘|주)|완성")
 
 
 def harmful_type_for(last_text: str) -> str:
