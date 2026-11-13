@@ -31,6 +31,35 @@ def fold_of(item_id: str) -> str:
     return "A" if int(hashlib.sha256(item_id.encode()).hexdigest(), 16) % 2 == 0 else "B"
 
 
+def group_folds(items, threshold=0.5):
+    """마지막 학습자 발화의 문자 3-gram 유사도가 threshold 이상인 문항을 같은 그룹으로 묶고(합집합),
+    그룹 단위로 A/B를 나눈다. 거의 같은 문항이 양쪽에 갈려 few-shot 예시로 새는 것을 막는다."""
+    import re
+    sys.path.insert(0, str(ROOT))
+    from app.textnorm import normalize
+
+    def grams(t):
+        s = re.sub(r"\s+", "", normalize(t))
+        return {s[i:i + 3] for i in range(len(s) - 2)}
+    G = [grams(it["messages"][-1]["content"]) for it in items]
+    parent = list(range(len(items)))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    for i in range(len(items)):
+        for j in range(i + 1, len(items)):
+            if G[i] and G[j] and len(G[i] & G[j]) / len(G[i] | G[j]) >= threshold:
+                parent[find(i)] = find(j)
+    root_id = {}
+    for i, it in enumerate(items):
+        r = find(i)
+        root_id[r] = min(root_id.get(r, it["id"]), it["id"])
+    return {it["id"]: fold_of(root_id[find(i)]) for i, it in enumerate(items)}
+
+
 def wait_health(port, timeout=60):
     t0 = time.time()
     while time.time() - t0 < timeout:
@@ -51,7 +80,10 @@ def main():
     ap.add_argument("--tmp", default=None)
     ap.add_argument("--dump", action="store_true",
                     help="공개 세트 문항별 응답을 --tmp/pred.jsonl에 저장(오류 분석용, 공개 세트만)")
+    ap.add_argument("--endpoints", default="tutor,guard", help="채점할 엔드포인트(예: guard). 예시 풀은 항상 둘 다 쓴다")
+    ap.add_argument("--group-split", action="store_true", help="유사 질문 그룹 단위로 A/B 분할")
     a = ap.parse_args()
+    endpoints = [e.strip() for e in a.endpoints.split(",") if e.strip()]
     dumped = []
 
     from dotenv import dotenv_values
@@ -62,11 +94,14 @@ def main():
     token = "".join(ch for ch in (env_file.get("TEAM_TOKEN") or "") if ch.isprintable() and not ch.isspace())
     tmp = Path(a.tmp or tempfile.mkdtemp(prefix="halt_cv_"))
     folds = {"A": {}, "B": {}}
+    all_items = {ep: read_jsonl(ROOT / f"public/{ep}.jsonl") for ep in ("tutor", "guard")}
+    assign = (group_folds(all_items["tutor"] + all_items["guard"]) if a.group_split
+              else {it["id"]: fold_of(it["id"]) for ep in all_items for it in all_items[ep]})
     for ep in ("tutor", "guard"):
         for f in "AB":
             folds[f][ep] = []
-        for it in read_jsonl(ROOT / f"public/{ep}.jsonl"):
-            folds[fold_of(it["id"])][ep].append(it)
+        for it in all_items[ep]:
+            folds[assign[it["id"]]][ep].append(it)
     for f in "AB":
         d = tmp / f
         d.mkdir(parents=True, exist_ok=True)
@@ -109,7 +144,7 @@ def main():
                                    "candidate_answer": payload.get("candidate_answer"), "resp": resp})
                 return resp
 
-            public = folds[test]["tutor"] + folds[test]["guard"]
+            public = [it for ep in endpoints for it in folds[test][ep]]
             t0 = time.time()
             out = score_local.score_local(public, call, judge, kb, workers=a.workers)
             dt = time.time() - t0
