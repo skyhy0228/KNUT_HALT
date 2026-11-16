@@ -80,7 +80,8 @@ def load_settings() -> Settings:
         cache_dir=Path(os.environ.get("CACHE_DIR", ROOT / "cache")),
         request_budget_s=_float("REQUEST_BUDGET_S", 25.0),
         llm_call_timeout_s=_float("LLM_CALL_TIMEOUT_S", 20.0),
-        llm_concurrency=int(_float("LLM_CONCURRENCY", 64)),
+        # 튜터 투표(TUTOR_VOTE)로 튜터 요청 하나가 LLM을 2회 이상 부르므로 동시 64 요청에서 대기가 생기지 않게 96.
+        llm_concurrency=int(_float("LLM_CONCURRENCY", 96)),
         llm_hedge_after_s=_float("LLM_HEDGE_AFTER_S", 12.0),
         reasoning_effort=os.environ.get("REASONING_EFFORT", "low"),
         max_completion_tokens=int(_float("MAX_COMPLETION_TOKENS", 2000)),
