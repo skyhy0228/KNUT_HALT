@@ -57,7 +57,7 @@ if CLASSIFY_FEATURES:
 # TUTOR_PROBLEMS=1: 가드 A+와 같은 '문제 요구 나열'을 튜터에도 쓴다. 규칙 끔 교차 검증 2회에서 튜터 오답 67건 중
 # 31건이 문제 요청(과제 대행·유해·수업 외·정답만·탈옥)에 그대로 답한 경우였다(문항 0점 위험).
 # 문제 요구가 있으면 그 범주로 올리고(고정 문구·단계 안내로 답함), LLM이 고른 문제 범주를 normal로 내리지는 않는다.
-TUTOR_PROBLEMS = os.environ.get("TUTOR_PROBLEMS", "0") == "1"
+TUTOR_PROBLEMS = os.environ.get("TUTOR_PROBLEMS", "1") == "1"
 _ANSWER_ONLY_LINE = ("- answer_only: 풀이 없이 퀴즈·문제의 정답·선택지·최종 값만 달라는 요구. 막을 요구는 아니지만 "
                      "problems에 함께 적는다(정답 대신 단계로 안내한다).")
 _BENIGN = ("normal", "out_of_material", "pii_disclosure", "low_signal_input")
