@@ -45,6 +45,8 @@ class Settings:
     llm_call_timeout_s: float
     # 동시에 진행할 LLM 호출 수 상한(채점기 최대 동시 요청 64).
     llm_concurrency: int
+    # 헤지 요청 시작 시각(초). 0이면 끔. 첫 호출이 이 시간 안에 끝나지 않으면 같은 요청을 한 번 더 보낸다.
+    llm_hedge_after_s: float
     reasoning_effort: str
     max_completion_tokens: int
     # 질의 임베딩 호출 상한(초). 넘으면 BM25만 쓴다.
@@ -79,6 +81,7 @@ def load_settings() -> Settings:
         request_budget_s=_float("REQUEST_BUDGET_S", 25.0),
         llm_call_timeout_s=_float("LLM_CALL_TIMEOUT_S", 20.0),
         llm_concurrency=int(_float("LLM_CONCURRENCY", 64)),
+        llm_hedge_after_s=_float("LLM_HEDGE_AFTER_S", 0.0),
         reasoning_effort=os.environ.get("REASONING_EFFORT", "low"),
         max_completion_tokens=int(_float("MAX_COMPLETION_TOKENS", 2000)),
         query_embed_timeout_s=_float("QUERY_EMBED_TIMEOUT_S", 3.0),

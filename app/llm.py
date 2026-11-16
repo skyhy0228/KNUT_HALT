@@ -19,6 +19,7 @@ log = logging.getLogger("halt")
 MIN_CALL_S = 2.0      # 남은 시간이 이보다 적으면 호출하지 않는다.
 RETRY_MIN_S = 8.0     # 재시도는 남은 시간이 이 이상일 때만.
 MARGIN_S = 0.5        # 응답 직렬화·전송 여유.
+HEDGE_MIN_S = 4.0     # 헤지 요청은 남은 시간이 이 이상일 때만 보낸다.
 
 
 def remaining(deadline: float) -> float:
@@ -45,12 +46,53 @@ class LLM:
                                       extra_body={"reasoning_effort": self.s.reasoning_effort})
         if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
+        kwargs["timeout"] = timeout  # 요청 단위 상한(클라이언트 기본 상한보다 우선)
 
         async def call():
             async with self.sem:
                 r = await self.chat.chat.completions.create(**kwargs)
                 return r.choices[0].message.content or ""
         return await asyncio.wait_for(call(), timeout=timeout)
+
+    async def _json_once(self, messages, timeout: float, max_tokens: int) -> Dict[str, Any]:
+        obj = json.loads(await self._chat_once(messages, timeout, max_tokens, True))
+        if not isinstance(obj, dict):
+            raise TypeError("json_not_object")
+        return obj
+
+    async def _json_hedged(self, messages, deadline: float, max_tokens: int) -> Dict[str, Any]:
+        """헤지 요청: 첫 호출이 LLM_HEDGE_AFTER_S초 안에 끝나지 않으면 같은 요청을 한 번 더 보내고
+        먼저 성공한 응답을 쓴다(나머지는 취소). 운영진 API는 같은 크기의 요청도 3~23초로 처리 시간이
+        크게 흔들려(2026-11-16 측정) 일부 요청이 시간 초과로 대체 답변이 되는 것을 막는다.
+        요청 내용이 같으므로 답변 품질은 바뀌지 않고, 늦어진 요청만 호출이 1회 늘어난다."""
+        left = remaining(deadline) - MARGIN_S
+        hedge = self.s.llm_hedge_after_s
+        if hedge <= 0:
+            return await self._json_once(messages, min(left, self.s.llm_call_timeout_s), max_tokens)
+        first = asyncio.ensure_future(self._json_once(messages, left, max_tokens))
+        try:
+            return await asyncio.wait_for(asyncio.shield(first), timeout=min(hedge, left))
+        except asyncio.TimeoutError:
+            if first.done():  # 대기가 끝나는 순간 첫 호출이 끝났다면 그 결과(또는 첫 호출 자체의 오류)
+                return first.result()
+        left2 = remaining(deadline) - MARGIN_S
+        if left2 < HEDGE_MIN_S:
+            return await first
+        log.warning("llm_hedged")
+        second = asyncio.ensure_future(self._json_once(messages, left2, max_tokens))
+        pending = {first, second}
+        last_exc: BaseException = asyncio.TimeoutError()
+        try:
+            while pending:
+                done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                for t in done:
+                    if t.exception() is None:
+                        return t.result()
+                    last_exc = t.exception()
+            raise last_exc
+        finally:
+            for t in pending:
+                t.cancel()
 
     async def chat_json(self, messages: List[Dict[str, str]], deadline: float,
                         max_tokens: Optional[int] = None) -> Optional[Dict[str, Any]]:
@@ -61,16 +103,14 @@ class LLM:
             if left < (MIN_CALL_S if attempt == 0 else RETRY_MIN_S):
                 return None
             try:
-                text = await self._chat_once(messages, min(left, self.s.llm_call_timeout_s), max_tokens, True)
-                obj = json.loads(text)
-                if isinstance(obj, dict):
-                    return obj
-                log.warning("llm_json_not_object attempt=%d", attempt)
+                return await self._json_hedged(messages, deadline, max_tokens)
             except asyncio.TimeoutError:
                 log.warning("llm_timeout attempt=%d", attempt)
                 return None  # 시간 초과 뒤 재시도는 마감을 넘기기 쉽다.
             except json.JSONDecodeError:
                 log.warning("llm_json_decode_error attempt=%d", attempt)
+            except TypeError:
+                log.warning("llm_json_not_object attempt=%d", attempt)
             except Exception as e:  # 네트워크·API 오류
                 log.warning("llm_error attempt=%d type=%s", attempt, type(e).__name__)
         return None
