@@ -74,8 +74,8 @@ if TUTOR_PROBLEMS:
 # The Power of Noise(관련 있어 보이는 방해 문서가 가장 해롭다), Context-faithful Prompting(맥락을 화자의 설명으로 제시).
 # 우리 측정: 같은 이름의 다른 섹션 값을 쓰는 경우, 근거 충실은 '인용한 섹션'에만 비추어 판정되는데 답 출처와 인용이
 # 어긋나는 경우(6건), 답을 길게 쓰면 자료 밖 내용이 붙는 경우(5→12건)가 있었다.
-TUTOR_QUOTES = os.environ.get("TUTOR_QUOTES", "0") == "1"
-TUTOR_CTX = os.environ.get("TUTOR_CTX", "0") == "1"
+TUTOR_QUOTES = os.environ.get("TUTOR_QUOTES", "1") == "1"
+TUTOR_CTX = os.environ.get("TUTOR_CTX", "1") == "1"
 QUOTES_GUIDE = """[메모·근거 문장] 답을 쓰기 전에 다음 순서로 채운다.
 1) notes: [자료]의 섹션마다 하나씩 {"id": "섹션 ID", "same": 학습자가 말한 실습·예제·상품·개념과 같은 대상이면 true, "answer": 질문의 답(값·이름·조건)이 이 섹션에 적혀 있으면 true}. 이름이 같아도 실습의 입력·값·조건이 다르면 다른 대상이다.
 2) quotes: 같은 대상이면서 답이 있는 섹션에서, 답의 근거가 되는 문장을 글자 그대로 1~2개 복사한다: {"id": "섹션 ID", "text": "복사한 문장"}. out_of_material이면 덧붙일 관련 사실 문장을 복사하고, 거절·전환할 요청이면 []로 둔다.
