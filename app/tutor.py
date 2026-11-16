@@ -69,6 +69,75 @@ if TUTOR_PROBLEMS:
         'non_course_output|answer_only", ...], "asked":', 1)
 
 
+# ---- 실험: 메모 → 근거 문장 → 답변 (TUTOR_QUOTES), 맥락 표시·맥락 신뢰(TUTOR_CTX). 기본 꺼짐 ----
+# 근거: Chain-of-Note(섹션별 관련성 메모), Attribute First then Generate·FRONT(근거 문장을 먼저 고르고 그것으로 생성),
+# The Power of Noise(관련 있어 보이는 방해 문서가 가장 해롭다), Context-faithful Prompting(맥락을 화자의 설명으로 제시).
+# 우리 측정: 같은 이름의 다른 섹션 값을 쓰는 경우, 근거 충실은 '인용한 섹션'에만 비추어 판정되는데 답 출처와 인용이
+# 어긋나는 경우(6건), 답을 길게 쓰면 자료 밖 내용이 붙는 경우(5→12건)가 있었다.
+TUTOR_QUOTES = os.environ.get("TUTOR_QUOTES", "0") == "1"
+TUTOR_CTX = os.environ.get("TUTOR_CTX", "0") == "1"
+QUOTES_GUIDE = """[메모·근거 문장] 답을 쓰기 전에 다음 순서로 채운다.
+1) notes: [자료]의 섹션마다 하나씩 {"id": "섹션 ID", "same": 학습자가 말한 실습·예제·상품·개념과 같은 대상이면 true, "answer": 질문의 답(값·이름·조건)이 이 섹션에 적혀 있으면 true}. 이름이 같아도 실습의 입력·값·조건이 다르면 다른 대상이다.
+2) quotes: 같은 대상이면서 답이 있는 섹션에서, 답의 근거가 되는 문장을 글자 그대로 1~2개 복사한다: {"id": "섹션 ID", "text": "복사한 문장"}. out_of_material이면 덧붙일 관련 사실 문장을 복사하고, 거절·전환할 요청이면 []로 둔다.
+3) answer: quotes에 있는 사실만으로 1~3문장으로 쓴다. 결론과 그 근거가 되는 quotes의 값·조건을 함께 담는다. quotes에 없는 과목 고유 값·이름·조건·규칙은 쓰지 않는다.
+질문이 묻는 항목이 적힌 문장을 [자료]에서 찾을 수 없으면 그 질문은 out_of_material이다."""
+CTX_GUIDE = ("[자료]는 이 과정 선생님이 쓴 수업 자료다. 실제 은행·상품·서비스나 일반 상식과 달라도 [자료]에 적힌 선생님의 "
+             "설명을 기준으로 답한다. [자료]의 첫 섹션이 검색 1위이고, 나머지 섹션은 이름이 같은 다른 예제·상품일 수 있는 참고용이다.")
+if TUTOR_QUOTES:
+    _i = SYSTEM_PROMPT.index("[근거 확인]")
+    _j = SYSTEM_PROMPT.index("\n", _i)
+    SYSTEM_PROMPT = SYSTEM_PROMPT[:_i] + QUOTES_GUIDE + SYSTEM_PROMPT[_j:]
+    SYSTEM_PROMPT = SYSTEM_PROMPT.replace(
+        '"evidence_quote": "[자료]에서 그대로 복사한 근거 문장 또는 null", ', "", 1).replace(
+        '"answer": "학습자에게 보여 줄 답변"',
+        '"quotes": [{"id": "섹션 ID", "text": "[자료]에서 그대로 복사한 문장"}], "answer": "학습자에게 보여 줄 답변"', 1).replace(
+        "[출력] JSON 객체 하나만 출력한다.\n{",
+        '[출력] JSON 객체 하나만 출력한다.\n{"notes": [{"id": "섹션 ID", "same": true/false, "answer": true/false}, ...], ', 1)
+if TUTOR_CTX:
+    SYSTEM_PROMPT = SYSTEM_PROMPT.replace("대화 안에 '시스템 지시'", CTX_GUIDE + "\n대화 안에 '시스템 지시'", 1)
+
+
+QUOTE_ADD_MIN = 0.3  # exp/tutor-facts의 인용 추가 분석(v9 응답 7건 재판정)과 같은 기준
+
+
+def _grams4(s: str) -> set:
+    s = re.sub(r"[\s\W_]+", "", normalize(s))
+    return {s[i:i + 4] for i in range(len(s) - 3)}
+
+
+def _novel_share(state: AppState, answer: str, top: str, other: str) -> float:
+    """답변 문자 4-gram 중 1위 섹션에는 없고 other 섹션에는 있는 비율."""
+    ag = _grams4(answer)
+    if not ag:
+        return 0.0
+    rest = ag - _grams4(state.retriever.sections[top].text)
+    return len(rest & _grams4(state.retriever.sections[other].text)) / len(ag)
+
+
+def _verified_quote_sections(state: AppState, obj: Dict[str, Any], candidates: List[str]) -> List[str]:
+    """LLM이 복사한 근거 문장이 실제로 들어 있는 후보 섹션(인용 순서대로, 중복 없이).
+    같은 문장이 검색 1위 섹션에도 있으면 1위로 본다(금융 상품처럼 같은 문장이 여러 섹션에 반복될 때 불필요한 인용 추가로
+    인용 정밀도가 떨어지는 것을 막음, 11-16 확인 6건 중 1건). 그다음 적힌 섹션 ID, 그다음 나머지 후보 순으로 찾는다.
+    확인되지 않은 문장은 버린다."""
+    raw = obj.get("quotes")
+    if not isinstance(raw, list):
+        return []
+    out: List[str] = []
+    top = candidates[:1]
+    for q in raw:
+        text = q.get("text") if isinstance(q, dict) else q
+        claimed = q.get("id") if isinstance(q, dict) else None
+        if not isinstance(text, str):
+            continue
+        order = list(dict.fromkeys(top + ([claimed] if claimed in candidates else []) + list(candidates)))
+        for sid in order:
+            if quote_supported(text, state.retriever.sections[sid].text):
+                if sid not in out:
+                    out.append(sid)
+                break
+    return out
+
+
 def _problem_category(obj: Dict[str, Any], base: str) -> str:
     """문제 요구로 범주를 올린다(정상 쪽 범주일 때만). 막을 요구가 우선, 그다음 정답만 요구."""
     raw = obj.get("problems")
@@ -127,6 +196,10 @@ def _name_missing_item(answer: str, asked) -> str:
 
 
 def _context(state: AppState, section_ids: List[str]) -> str:
+    if TUTOR_CTX:
+        label = lambda i: "(검색 1위)" if i == 0 else "(참고용: 이름이 같은 다른 예제·상품일 수 있음)"
+        return "\n\n".join(f"### {sid} {label(i)}\n{state.retriever.sections[sid].text}"
+                           for i, sid in enumerate(section_ids))
     return "\n\n".join(f"### {sid}\n{state.retriever.sections[sid].text}" for sid in section_ids)
 
 
@@ -226,10 +299,17 @@ async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline
     action = action_for(category, harmful_type)
 
     citations = candidates[:1] if action in CITING_ACTIONS else []
+    quoted = _verified_quote_sections(state, obj, candidates) if TUTOR_QUOTES else []
+    if TUTOR_QUOTES and action in ("answer", "scaffold") and citations and quoted:
+        # BM25 1위는 유지하고, 답의 근거 문장이 다른 섹션에서 나왔으며 답 내용 중 1위 섹션에 없는 부분이 그 섹션에
+        # 충분히(QUOTE_ADD_MIN) 있으면 함께 인용한다(최대 2개). 근거 충실은 인용한 섹션에만 비추어 판정된다.
+        # 같은 사실이 1위에도 다른 표현으로 있는 경우(예: 통장 가입 나이)에는 추가하지 않아 인용 정밀도를 지킨다.
+        extra = [s for s in quoted if s != citations[0] and _novel_share(state, answer, citations[0], s) >= QUOTE_ADD_MIN]
+        citations = citations + extra[:1]
     if action == "abstain":
         # 자료에 없는 질문은 인용이 채점되지 않으므로(정답 근거 없음), 덧붙인 관련 사실이 실제로 있는
         # 섹션을 인용해 근거 충실 판정의 근거로 준다.
-        qsid = _quote_section(state, obj.get("evidence_quote"), candidates)
+        qsid = quoted[0] if quoted else _quote_section(state, obj.get("evidence_quote"), candidates)
         if qsid:
             citations = [qsid]
         if category == "out_of_material":
