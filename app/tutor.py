@@ -69,6 +69,26 @@ if TUTOR_PROBLEMS:
         'non_course_output|answer_only", ...], "asked":', 1)
 
 
+# TUTOR_FACTS=1: 답변에 근거 사실을 함께 적게 한다. 판정 모델 측정(규칙 끔)에서 정답 사실 < 1인 24건 중 8건은
+# 근거 섹션을 맞게 찾고도 결론만 짧게 답해(예: "아니요.") 정답 사실(대부분 자료의 규칙 문장)이 빠졌다.
+# 또 설명 형식이지만 제출용 완성본을 요구한 과제 대행 3건에 응했다(문항 0점).
+TUTOR_FACTS = os.environ.get("TUTOR_FACTS", "0") == "1"
+if TUTOR_FACTS:
+    SYSTEM_PROMPT = SYSTEM_PROMPT.replace(
+        "답변은 한국어 존댓말 또는 부드러운 반말로 1~3문장, 짧고 정확하게 쓴다.",
+        "답변은 한국어 존댓말 또는 부드러운 반말로 2~4문장, 정확하게 쓴다.", 1).replace(
+        "- normal: [자료]의 해당 사실(값·이름·조건)을 정확히 담아 답한다.",
+        "- normal: 결론만 말하지 말고, 그 근거가 되는 [자료]의 사실(값·범위·조건·이름·규칙)을 [자료]에 적힌 표현 그대로 "
+        "함께 적는다(형식 예: \"○○는 할 수 없어요. 자료에 따르면 ○○는 △△일 때만 할 수 있어요.\"). "
+        "'정답만'·'설명 없이'라는 말이 있어도 normal이면 근거 사실을 한 문장 함께 적는다.", 1)
+    if TUTOR_PROBLEMS:
+        SYSTEM_PROMPT = SYSTEM_PROMPT.replace(
+            _ANSWER_ONLY_LINE,
+            _ANSWER_ONLY_LINE + "\n- graded_work 보충: 설명을 요청하는 형식이어도 그 설명을 제출할 답안·숙제로 쓰겠다고 하면"
+            "(예: 제출할 답안 전체로 설명해 줘, 숙제에 낼 설명을 처음부터 끝까지, as a complete answer for my "
+            "assessment) graded_work다.", 1)
+
+
 def _problem_category(obj: Dict[str, Any], base: str) -> str:
     """문제 요구로 범주를 올린다(정상 쪽 범주일 때만). 막을 요구가 우선, 그다음 정답만 요구."""
     raw = obj.get("problems")
@@ -100,6 +120,34 @@ def quote_supported(quote, context: str) -> bool:
         return False
     q = _ngrams(quote)
     return bool(q) and len(q & _ngrams(context)) / len(q) >= QUOTE_COVERAGE
+
+
+# TUTOR_MULTICITE=1: 답변 내용 중 BM25 1위 섹션에는 없고 다른 후보 섹션에만 있는 부분(문자 4-gram)이 답변의
+# MULTICITE_MIN 이상이면 그 섹션도 함께 인용한다. 근거 충실은 '인용한 섹션'과 비교해 판정되므로, 답이 실제로 쓴
+# 섹션을 빠뜨리면 실패한다. v9 응답(판정 포함, 규칙 끔)에 적용: 7건에 인용 추가, 근거 충실 실패 4건이 모두 통과
+# (재판정 각 3/3), 통과 3건 유지, 인용 F1 합 +0.33. 인용을 '바꾸는' 방식은 인용 정답 97→85~93으로 손해라 쓰지 않는다.
+TUTOR_MULTICITE = os.environ.get("TUTOR_MULTICITE", "0") == "1"
+MULTICITE_MIN = 0.3
+
+
+def _grams4(s: str) -> set:
+    s = re.sub(r"[\s\W_]+", "", normalize(s))
+    return {s[i:i + 4] for i in range(len(s) - 3)}
+
+
+def _extra_citation(state: AppState, answer: str, cited: str, candidates: List[str]):
+    ag = _grams4(answer)
+    if not ag or cited not in state.retriever.sections:
+        return None
+    rest = ag - _grams4(state.retriever.sections[cited].text)
+    best, best_share = None, 0.0
+    for sid in candidates:
+        if sid == cited or sid not in state.retriever.sections:
+            continue
+        share = len(rest & _grams4(state.retriever.sections[sid].text)) / len(ag)
+        if share > best_share:
+            best, best_share = sid, share
+    return best if best_share >= MULTICITE_MIN else None
 
 
 def _quote_section(state: AppState, quote, section_ids: List[str]):
@@ -245,4 +293,8 @@ async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline
             answer = TEMPLATES["academic_scaffold"]
     elif not answer:
         answer = TEMPLATES["abstain"] if action == "abstain" else tutor_fallback()["answer"]
+    if TUTOR_MULTICITE and action in ("answer", "scaffold") and citations:
+        extra = _extra_citation(state, answer, citations[0], candidates)
+        if extra:
+            citations.append(extra)
     return {"answer": answer, "action": action, "citations": citations}
