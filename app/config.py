@@ -82,7 +82,7 @@ def load_settings() -> Settings:
         llm_call_timeout_s=_float("LLM_CALL_TIMEOUT_S", 20.0),
         llm_concurrency=int(_float("LLM_CONCURRENCY", 64)),
         llm_hedge_after_s=_float("LLM_HEDGE_AFTER_S", 12.0),
-        reasoning_effort=os.environ.get("REASONING_EFFORT", "low"),
+        reasoning_effort=os.environ.get("REASONING_EFFORT", "medium"),  # v9-medium: low → medium(사용자 결정, 2026-11-16)
         max_completion_tokens=int(_float("MAX_COMPLETION_TOKENS", 2000)),
         query_embed_timeout_s=_float("QUERY_EMBED_TIMEOUT_S", 3.0),
         use_dense=os.environ.get("USE_DENSE", "1") != "0",
