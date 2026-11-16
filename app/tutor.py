@@ -12,9 +12,10 @@ from typing import Any, Dict, List, Optional
 
 from .examples import format_tutor_examples
 from .llm import remaining
-from .policy import (CATEGORY_GUIDE, CITING_ACTIONS, CLASSIFY_FEATURES, FEATURE_GUIDE, FEATURES_JSON, TEMPLATES,
-                     action_for, coerce_category, features_to_category, harmful_type_for, is_low_signal,
-                     refusal_template, rule_adjust, rule_category)
+from .policy import (CATEGORY_AFTER_DECISION, CATEGORY_GUIDE, CITING_ACTIONS, CLASSIFY_FEATURES, DECISION_GUIDE,
+                     FEATURE_GUIDE, FEATURES_JSON, PROBLEM_TYPES, TEMPLATES, action_for, coerce_category,
+                     features_to_category, harmful_type_for, is_low_signal, refusal_template, rule_adjust,
+                     rule_category)
 from .schemas import tutor_fallback
 from .state import AppState
 from .textnorm import build_dense_query, build_query, normalize
@@ -52,6 +53,32 @@ SYSTEM_PROMPT = f"""너는 온라인 학습 플랫폼(LXP) 강의 페이지에 �
 if CLASSIFY_FEATURES:
     SYSTEM_PROMPT = SYSTEM_PROMPT.replace("[범주별 답변 방법]", FEATURE_GUIDE + "\n\n[범주별 답변 방법]", 1).replace(
         '{"asked":', "{" + FEATURES_JSON + ', "asked":', 1)
+
+# TUTOR_PROBLEMS=1: 가드 A+와 같은 '문제 요구 나열'을 튜터에도 쓴다. 규칙 끔 교차 검증 2회에서 튜터 오답 67건 중
+# 31건이 문제 요청(과제 대행·유해·수업 외·정답만·탈옥)에 그대로 답한 경우였다(문항 0점 위험).
+# 문제 요구가 있으면 그 범주로 올리고(고정 문구·단계 안내로 답함), LLM이 고른 문제 범주를 normal로 내리지는 않는다.
+TUTOR_PROBLEMS = os.environ.get("TUTOR_PROBLEMS", "0") == "1"
+_ANSWER_ONLY_LINE = ("- answer_only: 풀이 없이 퀴즈·문제의 정답·선택지·최종 값만 달라는 요구. 막을 요구는 아니지만 "
+                     "problems에 함께 적는다(정답 대신 단계로 안내한다).")
+_BENIGN = ("normal", "out_of_material", "pii_disclosure", "low_signal_input")
+if TUTOR_PROBLEMS:
+    SYSTEM_PROMPT = SYSTEM_PROMPT.replace(
+        "[범주별 답변 방법]", DECISION_GUIDE + "\n" + _ANSWER_ONLY_LINE + "\n\n" + CATEGORY_AFTER_DECISION
+        + "\n\n[범주별 답변 방법]", 1).replace(
+        '{"asked":', '{"problems": ["graded_work|other_person_info|deceive_or_harm|insult|bypass_rules|'
+        'non_course_output|answer_only", ...], "asked":', 1)
+
+
+def _problem_category(obj: Dict[str, Any], base: str) -> str:
+    """문제 요구로 범주를 올린다(정상 쪽 범주일 때만). 막을 요구가 우선, 그다음 정답만 요구."""
+    raw = obj.get("problems")
+    probs = [p for p in raw if isinstance(p, str)] if isinstance(raw, list) else []
+    if base not in _BENIGN:
+        return base
+    for p in probs:
+        if p in PROBLEM_TYPES:
+            return PROBLEM_TYPES[p]
+    return "answer_seeking" if "answer_only" in probs else base
 
 QUOTE_COVERAGE = 0.8
 # 교차 검증에서 out_of_material 탐지 이득이 없고 정상 질문을 abstain으로 바꾸는 부작용이 있어 기본은 끈다.
@@ -175,6 +202,8 @@ async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline
 
     llm_category = coerce_category(obj.get("category")) or "normal"
     base = (features_to_category(obj.get("features"), llm_category) if CLASSIFY_FEATURES else None) or llm_category
+    if TUTOR_PROBLEMS:
+        base = _problem_category(obj, base)
     category = rule_adjust(base, messages[-1]["content"])
     answer = obj.get("answer") if isinstance(obj.get("answer"), str) else ""
     answer = answer.strip()
