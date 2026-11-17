@@ -81,4 +81,6 @@ def sanitize_guard(obj: Any, has_candidate: bool) -> Dict[str, Any]:
             "safe": o["safe"] if isinstance(o.get("safe"), bool) else True,
             "category": o["category"] if isinstance(o.get("category"), str) else category,
         }
+    if isinstance(obj.get("_debug"), dict):  # 개발용 신호(GUARD_DEBUG=1일 때만 생김, 채점 서버에서는 꺼짐)
+        result["_debug"] = obj["_debug"]
     return result

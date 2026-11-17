@@ -232,19 +232,37 @@ async def handle_guard(state: AppState, messages: List[Dict[str, str]],
     if not objs:
         return rule_only_guard(messages, candidate)
 
+    result = _decide(state, messages, candidate, objs)
+    if GUARD_DEBUG:
+        result["_debug"] = {"votes": objs}
+    return result
+
+
+def _decide(state: AppState, messages: List[Dict[str, str]], candidate: Optional[str], objs: List[Dict[str, Any]],
+            span_vote: Optional[str] = None, trim: Optional[bool] = None, recall: Optional[bool] = None) -> Dict[str, Any]:
+    """LLM 출력(표 목록)으로 최종 판정을 만든다. 개발용 오프라인 비교가 같은 코드를 쓰도록 handle_guard에서 떼어 냈다.
+    span_vote·trim·recall을 주지 않으면 환경 변수 기본값(GUARD_SPAN_VOTE·GUARD_SPAN_TRIM·GUARD_CAT_RECALL)을 쓴다."""
+    span_vote = SPAN_VOTE if span_vote is None else span_vote
+    trim = SPAN_TRIM if trim is None else trim
+    recall = CAT_RECALL if recall is None else recall
+    has_candidate = candidate is not None
+    last = messages[-1]["content"]
+    rule_low_signal = is_low_signal(last)
     votes = [(o, _input_verdict(o, last, rule_low_signal)) for o in objs]
     category, decision, obj = _vote_input(votes)
-    if CAT_RECALL and decision == "allow" and category == "normal":
+    if recall and decision == "allow" and category == "normal":
         category = _recall_category(votes) or category
     result: Dict[str, Any] = {"input": {"decision": decision, "category": category}}
     if has_candidate:
         safe = obj.get("safe") if isinstance(obj.get("safe"), bool) else True
         grounded = obj.get("grounded") if isinstance(obj.get("grounded"), bool) else True
+        agree = [obj]
         if len(objs) > 1:
             # grounded도 다수결로 정하고, 근거 없는 구간은 다수와 같은 판정을 낸 응답에서 가져온다.
             g_votes = [o.get("grounded") if isinstance(o.get("grounded"), bool) else True for o in objs]
             grounded = Counter(g_votes).most_common(1)[0][0]
-            obj = next(o for o, g in zip(objs, g_votes) if g == grounded)
+            agree = [o for o, g in zip(objs, g_votes) if g == grounded]
+            obj = agree[0]
         if SAFE_FROM_DECISION:
             safe = True  # 사실 오류는 grounded로만 본다. unsafe는 아래 입력 판정으로만 정한다.
         # 막아야 할 입력에 거절·전환 없이 답한 후보는 요청에 응한 것이다(공개 세트 19/19건 unsafe, 거절 표현 0건).
@@ -254,12 +272,83 @@ async def handle_guard(state: AppState, messages: List[Dict[str, str]],
         if not safe:
             grounded = True
         elif not grounded:
-            spans = _valid_spans(obj.get("unsupported"), candidate) or _fallback_span(candidate)
-            if SPAN_TRIM:
+            per_vote = [_valid_spans(o.get("unsupported"), candidate) for o in agree]
+            spans = (_consensus_spans(per_vote, candidate, span_vote, len(objs)) if span_vote != "first" else None) \
+                or per_vote[0] or _fallback_span(candidate)
+            if trim:
                 ctx = _norm("".join(state.retriever.sections[sid].text for sid in _retrieve(state, messages, candidate)))
                 spans = list(dict.fromkeys(_trim_topic(s, ctx) for s in spans))
         result["output"] = {"grounded": grounded, "unsupported": spans, "safe": safe, "category": category}
     return result
+
+
+GUARD_DEBUG = os.environ.get("GUARD_DEBUG", "0") == "1"  # 개발용: 표별 LLM 출력을 _debug로 돌려준다(채점 서버에서는 끔)
+
+# GUARD_SPAN_VOTE: 근거 없는 구간을 여러 표에서 정하는 방식. 구간 채점은 글자 겹침 F1이라 표 사이의 글자 단위 합의로 정밀도를
+# 올릴 수 있는지 본다(근거 없는 구간은 다수 판정과 같은 표들만 쓴다).
+# first(기본, v13): 첫 표의 구간 / union: 그 표들이 짚은 글자 합집합 / majority: 전체 표의 과반이 짚은 글자 /
+# medoid: 다른 표들과 글자 겹침 F1 합이 가장 큰 표(동률이면 짧은 쪽) / shortest: 구간이 가장 짧은 표.
+# 글자 단위 방식은 후보 답변 안의 위치로 바꿔 세며, 이어진 글자 묶음을 원문 부분 문자열로 돌려준다. 합의 결과가 비면 first.
+# 측정(2026-11-17, 가드 교차 검증 2회의 표별 출력에 오프라인 적용, 정답 근거 없음 35건 구간 F1):
+# first 0.614/0.656, union 0.616/0.659, majority 0.653/0.698, medoid 0.676/0.698, shortest 0.647/0.674.
+# medoid + GUARD_SPAN_TRIM 0.736/0.746. 같은 표 출력에 대한 비교라 LLM 흔들림은 섞이지 않았지만 문항 수가 적다.
+SPAN_VOTE = os.environ.get("GUARD_SPAN_VOTE", "first")
+
+
+def _norm_index(text: str):
+    """(_norm(text), 그 각 글자의 원문 위치). 글자별 정규화라 _norm(text)와 드물게 다를 수 있다(찾기 실패로 처리)."""
+    chars, idx = [], []
+    for i, ch in enumerate(text):
+        n = _norm(ch)
+        chars.append(n)
+        idx.extend([i] * len(n))
+    return "".join(chars), idx
+
+
+def _span_slots(spans: List[str], ncand: str) -> set:
+    """구간들이 덮는 정규화 글자 위치(ncand 안의 순번). 구간마다 첫 출현 위치를 쓴다."""
+    slots = set()
+    for s in spans:
+        ns = _norm(s)
+        k = ncand.find(ns) if ns else -1
+        if k >= 0:
+            slots.update(range(k, k + len(ns)))
+    return slots
+
+
+def _slots_to_spans(slots: set, candidate: str, idx: List[int]) -> List[str]:
+    out, run = [], []
+    for k in range(len(idx) + 1):
+        if k < len(idx) and k in slots:
+            run.append(k)
+            continue
+        if run:
+            text = candidate[idx[run[0]]: idx[run[-1]] + 1].strip()
+            if text:
+                out.append(text)
+            run = []
+    return out
+
+
+def _consensus_spans(per_vote: List[List[str]], candidate: str, mode: str, n_votes: int) -> List[str]:
+    nonempty = [v for v in per_vote if v]
+    if not nonempty:
+        return []
+    if mode in ("medoid", "shortest"):
+        def length(v):
+            return len(_norm("".join(v)))
+        if mode == "shortest" or len(nonempty) == 1:
+            return min(nonempty, key=length)
+        score = [sum(_char_f1("".join(v), "".join(w)) for j, w in enumerate(nonempty) if j != i)
+                 for i, v in enumerate(nonempty)]
+        best = min(range(len(nonempty)), key=lambda i: (-score[i], length(nonempty[i])))
+        return nonempty[best]
+    ncand, idx = _norm_index(candidate)
+    counts = Counter()
+    for v in nonempty:
+        counts.update(_span_slots(v, ncand))
+    need = 1 if mode == "union" else n_votes // 2 + 1
+    return _slots_to_spans({k for k, c in counts.items() if c >= need}, candidate, idx)
 
 
 # GUARD_VOTES=N(기본 1): 같은 판정을 병렬로 N번 받아 다수결로 정한다. 근거: A+ 가드 같은 설정 3회 결과로 흉내 낸 3표 다수결
