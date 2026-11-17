@@ -6,6 +6,7 @@
 인용: 같은 사실이 여러 섹션에 반복되어 LLM이 고른 섹션보다 BM25 1위가 정답 근거와 더 자주 맞는다
 (공개 세트 교차 검증: LLM 선택 87/119, BM25 1위 106/119). 그래서 BM25 1위 섹션을 인용한다.
 """
+import asyncio
 import os
 import re
 from typing import Any, Dict, List, Optional
@@ -112,6 +113,67 @@ def _novel_share(state: AppState, answer: str, top: str, other: str) -> float:
         return 0.0
     rest = ag - _grams4(state.retriever.sections[top].text)
     return len(rest & _grams4(state.retriever.sections[other].text)) / len(ag)
+
+
+# TUTOR_GATE=τ(>0이면 켬): BM25 1·2위 점수 차이가 1위 점수의 τ 이상이면 1위 섹션만 맥락으로 준다(그 밖에는 3개).
+# 근거(v11 판정 측정, 규칙 끔): 차이 ≥ 0.3인 근거 있는 문항 86건에서 1위가 모두 정답. LLM이 1위가 아닌 섹션 문장을 근거로
+# 고른 16건 중 LLM 쪽 정답은 1건(1위 쪽 11건) → 함께 넣은 비슷한 섹션이 값 혼동을 만든다(The Power of Noise와 같은 현상).
+TUTOR_GATE = float(os.environ.get("TUTOR_GATE", "0") or 0)
+
+
+# TUTOR_OOMCHECK=off|observe|act: 답변 호출과 병렬로 '근거 충분성' 판정 호출을 한 번 한다(Sufficient Context, CRAG).
+# 같은 호출 안의 신호(in_material, 근거 문장 유무, 섹션 메모)로는 자료에 없는 질문을 가려내지 못했다(v11 측정: 답한 6건 중
+# 최대 2건 탐지, 오탐이 더 많음). observe는 결과를 _debug에만 남기고, act는 정상 범주인데 판정이
+# related_only·absent이면 자료에 없음(abstain)으로 바꾼다.
+TUTOR_OOMCHECK = os.environ.get("TUTOR_OOMCHECK", "off")
+SUFFICIENCY_PROMPT = """너는 학습 자료 검토자다. 학습자의 마지막 질문이 묻는 '정확한 항목'(값·규칙·조건·기능·이름)을 먼저 짧게 적고, 그 항목 자체가 아래 [자료]에 직접 적혀 있는지 판정한다.
+과정의 은행·상품·실습 이름은 수업용 가상 설정이며 [자료]에 적힌 것만 기준이다. 일반 상식으로 채우지 않는다.
+- stated: 묻는 항목의 값·내용이 [자료]에 직접 적혀 있다(표현이 달라도 같은 내용이면 stated).
+- related_only: 같은 대상(상품·실습·개념)의 다른 사실은 있지만, 묻는 항목 자체는 [자료]에 없다.
+- absent: 묻는 항목과 관련된 내용이 [자료]에 전혀 없다.
+- not_a_question: 수업 내용을 묻는 질문이 아니다(인사, 감정 표현, 거절해야 할 요청 등).
+[출력] JSON 객체 하나: {"asked": "묻는 항목", "status": "stated|related_only|absent|not_a_question", "evidence": "stated이면 [자료]에서 글자 그대로 복사한 근거 문장, 아니면 null"}"""
+
+
+async def _sufficiency(state: AppState, messages: List[Dict[str, str]], sections: List[str],
+                       deadline: float) -> Optional[Dict[str, Any]]:
+    convo = "\n".join(f"[{'학습자' if m['role'] == 'user' else '튜터'}] {m['content']}" for m in messages[-6:])
+    prompt = [{"role": "system", "content": SUFFICIENCY_PROMPT},
+              {"role": "system", "content": "[자료]\n" + _context(state, sections)},
+              {"role": "user", "content": "[대화]\n" + convo}]
+    obj = await state.llm.chat_json(prompt, deadline, max_tokens=1200)
+    if not isinstance(obj, dict) or obj.get("status") not in ("stated", "related_only", "absent", "not_a_question"):
+        return None
+    ev = obj.get("evidence")
+    verified = isinstance(ev, str) and any(quote_supported(ev, state.retriever.sections[s].text) for s in sections)
+    return {"status": obj["status"], "evidence_verified": verified}
+
+
+def _gated(ranked, candidates: List[str]) -> List[str]:
+    if TUTOR_GATE > 0 and len(ranked) > 1 and ranked[0][1] > 0:
+        if (ranked[0][1] - ranked[1][1]) / ranked[0][1] >= TUTOR_GATE:
+            return candidates[:1]
+    return candidates
+
+
+# TUTOR_DEBUG=1: 개발용 교차 검증에서 내부 신호를 응답의 "_debug"에 붙인다(섹션 ID·참거짓·점수만, 대화·답변 내용 없음).
+# 채점 서버에서는 꺼 둔다(기본 0). 자료에 없는 질문·같은 이름 예제 혼동 대책을 추가 호출 없이 오프라인으로 계산하는 데 쓴다.
+TUTOR_DEBUG = os.environ.get("TUTOR_DEBUG", "0") == "1"
+
+
+def _debug_signals(obj: Dict[str, Any], llm_category: str, category: str, ranked, quoted: List[str]) -> Dict[str, Any]:
+    notes = obj.get("notes") if isinstance(obj.get("notes"), list) else []
+    return {
+        "llm_category": llm_category,
+        "category": category,
+        "in_material": obj.get("in_material") if isinstance(obj.get("in_material"), bool) else None,
+        "problems": [p for p in obj.get("problems") or [] if isinstance(p, str)] if isinstance(obj.get("problems"), list) else [],
+        "notes": [{"id": n.get("id"), "same": n.get("same"), "answer": n.get("answer")}
+                  for n in notes if isinstance(n, dict)],
+        "n_quotes": len(obj.get("quotes")) if isinstance(obj.get("quotes"), list) else 0,
+        "quoted": quoted,
+        "ranked": [[sid, round(float(score), 3)] for sid, score in ranked],
+    }
 
 
 def _verified_quote_sections(state: AppState, obj: Dict[str, Any], candidates: List[str]) -> List[str]:
@@ -260,7 +322,10 @@ async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline
         return rule_only_tutor(state, messages, candidates)
 
     examples = state.examples.search(messages, state.settings.fewshot_k)
-    context = _context(state, candidates)
+    shown = _gated(ranked, candidates)
+    context = _context(state, shown)
+    suff_task = (asyncio.ensure_future(_sufficiency(state, messages, shown, deadline))
+                 if TUTOR_OOMCHECK in ("observe", "act") else None)
     prompt = [{"role": "system", "content": SYSTEM_PROMPT},
               {"role": "system", "content": "[자료]\n" + context}]
     if examples:
@@ -271,6 +336,8 @@ async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline
 
     obj = await state.llm.chat_json(prompt, deadline)
     if obj is None:
+        if suff_task:
+            suff_task.cancel()
         return rule_only_tutor(state, messages, candidates)
 
     llm_category = coerce_category(obj.get("category")) or "normal"
@@ -295,6 +362,15 @@ async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline
         category, answer = "out_of_material", TEMPLATES["abstain"]
     if OOM_CHECK and category in ("normal", "pii_disclosure") and obj.get("in_material") is False:
         category, answer = "out_of_material", TEMPLATES["abstain"]
+    suff = None
+    if suff_task:
+        try:
+            suff = await asyncio.wait_for(suff_task, timeout=max(0.1, remaining(deadline) - 1.0))
+        except Exception:  # 시간 초과·호출 실패 → 판정 없음
+            suff_task.cancel()
+    if (TUTOR_OOMCHECK == "act" and suff and suff["status"] in ("related_only", "absent")
+            and category in ("normal", "pii_disclosure")):
+        category, answer = "out_of_material", ""  # 아래에서 '○○은 자료에 없어요' 형식으로 채운다.
     harmful_type = harmful_type_for(messages[-1]["content"]) if category == "harmful_content" else None
     action = action_for(category, harmful_type)
 
@@ -325,4 +401,8 @@ async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline
             answer = TEMPLATES["academic_scaffold"]
     elif not answer:
         answer = TEMPLATES["abstain"] if action == "abstain" else tutor_fallback()["answer"]
-    return {"answer": answer, "action": action, "citations": citations}
+    result = {"answer": answer, "action": action, "citations": citations}
+    if TUTOR_DEBUG:
+        result["_debug"] = _debug_signals(obj, llm_category, category, ranked, quoted)
+        result["_debug"].update({"shown": shown, "sufficiency": suff})
+    return result
