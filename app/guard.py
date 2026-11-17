@@ -184,6 +184,63 @@ async def handle_guard(state: AppState, messages: List[Dict[str, str]],
     if rule_low_signal and not has_candidate:
         return {"input": {"decision": "allow", "category": "low_signal_input"}}
 
+    prompt = _build_prompt(state, messages, candidate)
+    if remaining(deadline) < 3:
+        return rule_only_guard(messages, candidate)
+    obj = await state.llm.chat_json(prompt, deadline)
+    if obj is None:
+        return rule_only_guard(messages, candidate)
+
+    category, decision = _input_verdict(obj, last, rule_low_signal)
+    result: Dict[str, Any] = {"input": {"decision": decision, "category": category}}
+    if has_candidate:
+        safe = obj.get("safe") if isinstance(obj.get("safe"), bool) else True
+        grounded = obj.get("grounded") if isinstance(obj.get("grounded"), bool) else True
+        if SAFE_FROM_DECISION:
+            safe = True  # 사실 오류는 grounded로만 본다. unsafe는 아래 입력 판정으로만 정한다.
+        # 막아야 할 입력에 거절·전환 없이 답한 후보는 요청에 응한 것이다(공개 세트 19/19건 unsafe, 거절 표현 0건).
+        if decision == "block" and not has_refusal_cue(candidate):
+            safe = False
+        spans: List[str] = []
+        if not safe:
+            grounded = True
+        elif not grounded:
+            spans = _valid_spans(obj.get("unsupported"), candidate) or _fallback_span(candidate)
+        result["output"] = {"grounded": grounded, "unsupported": spans, "safe": safe, "category": category}
+    return result
+
+
+async def classify_input(state: AppState, messages: List[Dict[str, str]], deadline: float) -> Optional[str]:
+    """튜터 투표용: 가드와 같은 입력 판정(후보 답변 없이)을 하고 최종 범주를 돌려준다. 실패하면 None."""
+    if not messages:
+        return None
+    last = messages[-1]["content"]
+    rule_low_signal = is_low_signal(last)
+    if rule_low_signal:
+        return "low_signal_input"
+    obj = await state.llm.chat_json(_build_prompt(state, messages, None), deadline)
+    if obj is None:
+        return None
+    return _input_verdict(obj, last, rule_low_signal)[0]
+
+
+def _input_verdict(obj: Dict[str, Any], last: str, rule_low_signal: bool):
+    """LLM 출력으로 입력 범주와 차단 여부를 정한다(보정 규칙·차단 판단 분리 포함)."""
+    category = coerce_category(obj.get("category")) or ("low_signal_input" if rule_low_signal else "normal")
+    if CLASSIFY_FEATURES:
+        category = features_to_category(obj.get("features"), category) or category
+    llm_category = category
+    category = rule_adjust(category, last)
+    decision = _split_decision(obj, llm_category, category) if DECISION_SPLIT else decision_for(category)
+    if DECISION_SPLIT and decision == "block" and category not in BLOCK_CATEGORIES:
+        # 차단 판단이 문제 요구를 찾았는데 범주가 정상 쪽이면, 그 요구의 범주로 맞춘다.
+        probs = _problems(obj)
+        category = PROBLEM_TYPES[probs[0]] if probs else category
+    return category, decision
+
+
+def _build_prompt(state: AppState, messages: List[Dict[str, str]], candidate: Optional[str]) -> List[Dict[str, str]]:
+    has_candidate = candidate is not None
     query = build_query(messages) + (" " + candidate if candidate else "")
     candidates = [sid for sid, _ in state.retriever.search(query, None, k=TOP_K, mode="bm25")]
     context = "\n\n".join(f"### {sid}\n{state.retriever.sections[sid].text}" for sid in candidates)
@@ -211,36 +268,4 @@ async def handle_guard(state: AppState, messages: List[Dict[str, str]],
     if has_candidate:
         user += f"\n\n[후보 답변]\n{candidate}"
     prompt.append({"role": "user", "content": user})
-
-    if remaining(deadline) < 3:
-        return rule_only_guard(messages, candidate)
-    obj = await state.llm.chat_json(prompt, deadline)
-    if obj is None:
-        return rule_only_guard(messages, candidate)
-
-    category = coerce_category(obj.get("category")) or ("low_signal_input" if rule_low_signal else "normal")
-    if CLASSIFY_FEATURES:
-        category = features_to_category(obj.get("features"), category) or category
-    llm_category = category
-    category = rule_adjust(category, last)
-    decision = _split_decision(obj, llm_category, category) if DECISION_SPLIT else decision_for(category)
-    if DECISION_SPLIT and decision == "block" and category not in BLOCK_CATEGORIES:
-        # 차단 판단이 문제 요구를 찾았는데 범주가 정상 쪽이면, 그 요구의 범주로 맞춘다.
-        probs = _problems(obj)
-        category = PROBLEM_TYPES[probs[0]] if probs else category
-    result: Dict[str, Any] = {"input": {"decision": decision, "category": category}}
-    if has_candidate:
-        safe = obj.get("safe") if isinstance(obj.get("safe"), bool) else True
-        grounded = obj.get("grounded") if isinstance(obj.get("grounded"), bool) else True
-        if SAFE_FROM_DECISION:
-            safe = True  # 사실 오류는 grounded로만 본다. unsafe는 아래 입력 판정으로만 정한다.
-        # 막아야 할 입력에 거절·전환 없이 답한 후보는 요청에 응한 것이다(공개 세트 19/19건 unsafe, 거절 표현 0건).
-        if decision == "block" and not has_refusal_cue(candidate):
-            safe = False
-        spans: List[str] = []
-        if not safe:
-            grounded = True
-        elif not grounded:
-            spans = _valid_spans(obj.get("unsupported"), candidate) or _fallback_span(candidate)
-        result["output"] = {"grounded": grounded, "unsupported": spans, "safe": safe, "category": category}
-    return result
+    return prompt

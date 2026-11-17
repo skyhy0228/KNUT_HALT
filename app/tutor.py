@@ -6,8 +6,11 @@
 인용: 같은 사실이 여러 섹션에 반복되어 LLM이 고른 섹션보다 BM25 1위가 정답 근거와 더 자주 맞는다
 (공개 세트 교차 검증: LLM 선택 87/119, BM25 1위 106/119). 그래서 BM25 1위 섹션을 인용한다.
 """
+import asyncio
+import logging
 import os
 import re
+from collections import Counter
 from typing import Any, Dict, List, Optional
 
 from .examples import format_tutor_examples
@@ -16,7 +19,8 @@ from .policy import (CATEGORY_AFTER_DECISION, CATEGORY_GUIDE, CITING_ACTIONS, CL
                      FEATURE_GUIDE, FEATURES_JSON, PROBLEM_TYPES, TEMPLATES, action_for, coerce_category,
                      features_to_category, harmful_type_for, is_low_signal, refusal_template, rule_adjust,
                      rule_category)
-from .schemas import tutor_fallback
+from .guard import classify_input
+from .schemas import BLOCK_CATEGORIES, tutor_fallback
 from .state import AppState
 from .textnorm import build_dense_query, build_query, normalize
 
@@ -244,6 +248,48 @@ def rule_only_tutor(state: AppState, messages: List[Dict[str, str]], candidates:
     return {"answer": answer, "action": action, "citations": citations}
 
 
+log = logging.getLogger("halt")
+
+# TUTOR_VOTE=1 (방법 1: 판정 전용 호출 + 투표): 답변 호출과 병렬로 가드 A+ 입력 판정(classify_input)을 한 번 하고,
+# 튜터 범주와 묶음(공격 4종 / normal·pii / 그 밖의 범주)이 다르면 판정을 한 번 더 받아 다수결로 정한다.
+# 동률이면 공격 쪽을 택한다(공격을 놓치면 문항 0점). 근거: 튜터 3회 실행에서 action 오류 문항 47개 중 37개가
+# 실행마다 달라지는 무작위 오류였고, 저장된 3회 결과로 흉내 낸 3표 다수결은 정답 174→179/200.
+# 비용: 튜터 요청마다 호출 +1(병렬), 엇갈릴 때만 +1(순차). 효과는 실측하지 않았다(2026-11-16, 사용자 결정).
+TUTOR_VOTE = os.environ.get("TUTOR_VOTE", "1") == "1"
+VOTE_THIRD_MIN_S = 6.0  # 세 번째 판정은 남은 시간이 이 이상일 때만
+
+
+def _vote_group(category: str) -> str:
+    if category in BLOCK_CATEGORIES:
+        return "attack"
+    return "normal" if category in ("normal", "pii_disclosure") else category
+
+
+async def _vote(state: AppState, messages: List[Dict[str, str]], deadline: float,
+                tutor_category: str, cls_task: "asyncio.Future") -> str:
+    try:
+        first = await asyncio.wait_for(cls_task, timeout=max(0.1, remaining(deadline) - 1.0))
+    except Exception:  # 시간 초과·호출 실패 → 튜터 판정 그대로
+        cls_task.cancel()
+        return tutor_category
+    if first is None or _vote_group(first) == _vote_group(tutor_category):
+        return tutor_category
+    log.warning("tutor_vote_disagree")
+    votes = [tutor_category, first]
+    if remaining(deadline) >= VOTE_THIRD_MIN_S:
+        try:
+            third = await classify_input(state, messages, deadline)
+        except Exception:
+            third = None
+        if third is not None:
+            votes.append(third)
+    counts = Counter(_vote_group(c) for c in votes)
+    group, n = counts.most_common(1)[0]
+    if n < 2:  # 모두 다르면 공격 쪽, 공격이 없으면 튜터 판정
+        group = "attack" if "attack" in counts else _vote_group(tutor_category)
+    return next(c for c in votes if _vote_group(c) == group)
+
+
 async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline: float) -> Dict[str, Any]:
     if not messages:
         return {"answer": TEMPLATES["clarify"], "action": "clarify", "citations": []}
@@ -269,8 +315,11 @@ async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline
                        + format_tutor_examples(examples)})
     prompt.extend(messages)
 
+    cls_task = asyncio.ensure_future(classify_input(state, messages, deadline)) if TUTOR_VOTE else None
     obj = await state.llm.chat_json(prompt, deadline)
     if obj is None:
+        if cls_task:
+            cls_task.cancel()
         return rule_only_tutor(state, messages, candidates)
 
     llm_category = coerce_category(obj.get("category")) or "normal"
@@ -278,8 +327,12 @@ async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline
     if TUTOR_PROBLEMS:
         base = _problem_category(obj, base)
     category = rule_adjust(base, messages[-1]["content"])
+    if cls_task:
+        category = await _vote(state, messages, deadline, category, cls_task)
     answer = obj.get("answer") if isinstance(obj.get("answer"), str) else ""
     answer = answer.strip()
+    if category == "out_of_material" and llm_category != "out_of_material":
+        answer = ""  # 정상 답으로 쓴 글 대신 아래에서 '○○은 자료에 없어요' 형식으로 채운다.
     # 규칙이 범주를 바꿨다면 LLM 답변은 다른 범주 기준으로 쓴 것이다(예: 요청에 응한 답).
     # 거절·전환·대행 거절 범주로 바뀐 경우 답변을 고정 문구로 바꾼다.
     if category != llm_category:
