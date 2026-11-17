@@ -49,7 +49,10 @@ def sanitize_tutor(obj: Any) -> Dict[str, Any]:
     action = obj.get("action") if obj.get("action") in ACTIONS else "answer"
     cites = obj.get("citations")
     cites = list(dict.fromkeys(c for c in cites if isinstance(c, str))) if isinstance(cites, list) else []
-    return {"answer": answer[:ANSWER_MAX], "action": action, "citations": cites}
+    out = {"answer": answer[:ANSWER_MAX], "action": action, "citations": cites}
+    if isinstance(obj.get("_debug"), dict):  # 개발용 신호(TUTOR_DEBUG=1일 때만 생김, 채점 서버에서는 꺼짐)
+        out["_debug"] = obj["_debug"]
+    return out
 
 
 def guard_fallback(has_candidate: bool) -> Dict[str, Any]:

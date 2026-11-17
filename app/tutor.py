@@ -123,10 +123,15 @@ def _verified_quote_sections(state: AppState, obj: Dict[str, Any], candidates: L
     같은 문장이 검색 1위 섹션에도 있으면 1위로 본다(금융 상품처럼 같은 문장이 여러 섹션에 반복될 때 불필요한 인용 추가로
     인용 정밀도가 떨어지는 것을 막음, 11-16 확인 6건 중 1건). 그다음 적힌 섹션 ID, 그다음 나머지 후보 순으로 찾는다.
     확인되지 않은 문장은 버린다."""
+    return list(dict.fromkeys(sid for sid, _ in _verified_quotes(state, obj, candidates)))
+
+
+def _verified_quotes(state: AppState, obj: Dict[str, Any], candidates: List[str]):
+    """[(섹션 ID, 근거 문장)]: 검증을 통과한 근거 문장과 그 문장이 실제로 있는 섹션(인용 순서대로)."""
     raw = obj.get("quotes")
     if not isinstance(raw, list):
         return []
-    out: List[str] = []
+    out = []
     top = candidates[:1]
     for q in raw:
         text = q.get("text") if isinstance(q, dict) else q
@@ -136,10 +141,31 @@ def _verified_quote_sections(state: AppState, obj: Dict[str, Any], candidates: L
         order = list(dict.fromkeys(top + ([claimed] if claimed in candidates else []) + list(candidates)))
         for sid in order:
             if quote_supported(text, state.retriever.sections[sid].text):
-                if sid not in out:
-                    out.append(sid)
+                out.append((sid, text.strip()))
                 break
     return out
+
+
+# TUTOR_QUOTE_IN_ANSWER=1: 정상 질문 답변에, 인용한 섹션에서 나온 검증된 근거 문장을 그대로 덧붙인다
+# ("자료에는 "…"라고 나와 있어요."). 정답 사실은 대부분 자료 문장을 풀어 쓴 것이라 맞는 섹션의 원문을 넣으면 담길
+# 확률이 높고, 덧붙이는 내용이 인용 섹션의 원문뿐이라 근거 충실도 지킨다(자기 말로 늘려 쓰다 실패한 TUTOR_FACTS와 다름).
+# 답변에 그 문장 내용이 이미 60% 이상 있거나, 표 행이거나, 160자를 넘으면 붙이지 않는다.
+TUTOR_QUOTE_IN_ANSWER = os.environ.get("TUTOR_QUOTE_IN_ANSWER", "0") == "1"
+TUTOR_DEBUG = os.environ.get("TUTOR_DEBUG", "0") == "1"  # 개발용: 바뀌기 전 답변 등을 _debug에 남김(채점 서버에서는 끔)
+
+
+def _with_quote(answer: str, quotes, citations: List[str]) -> str:
+    for sid, text in quotes:
+        if sid not in citations:
+            continue
+        text = re.sub(r"\s+", " ", text).strip().strip('"“”')
+        if not text or "|" in text or len(text) > 160:
+            continue
+        q = _ngrams(text)
+        if q and len(q & _ngrams(answer)) / len(q) >= 0.6:
+            return answer  # 이미 답변에 들어 있음
+        return f'{answer} 자료에는 "{text}"라고 나와 있어요.'
+    return answer
 
 
 def _problem_category(obj: Dict[str, Any], base: str) -> str:
@@ -378,4 +404,10 @@ async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline
             answer = TEMPLATES["academic_scaffold"]
     elif not answer:
         answer = TEMPLATES["abstain"] if action == "abstain" else tutor_fallback()["answer"]
-    return {"answer": answer, "action": action, "citations": citations}
+    before = answer
+    if TUTOR_QUOTE_IN_ANSWER and TUTOR_QUOTES and action == "answer" and category in ("normal", "pii_disclosure"):
+        answer = _with_quote(answer, _verified_quotes(state, obj, candidates), citations)
+    result = {"answer": answer, "action": action, "citations": citations}
+    if TUTOR_DEBUG:
+        result["_debug"] = {"answer_before": before, "quote_added": answer != before}
+    return result
