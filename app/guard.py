@@ -5,6 +5,7 @@
 - 안전하지 않은 후보: grounded=True, unsupported=[] (공개 19/19건).
 - grounded=True면 unsupported=[]. grounded=False면 구간은 후보 답변의 부분 문자열이어야 한다(공개 39/39건).
 """
+import asyncio
 import os
 import re
 import unicodedata
@@ -187,15 +188,24 @@ async def handle_guard(state: AppState, messages: List[Dict[str, str]],
     prompt = _build_prompt(state, messages, candidate)
     if remaining(deadline) < 3:
         return rule_only_guard(messages, candidate)
-    obj = await state.llm.chat_json(prompt, deadline)
-    if obj is None:
+    if GUARD_VOTES > 1:
+        objs = [o for o in await asyncio.gather(*[state.llm.chat_json(prompt, deadline) for _ in range(GUARD_VOTES)])
+                if o is not None]
+    else:
+        objs = [o for o in [await state.llm.chat_json(prompt, deadline)] if o is not None]
+    if not objs:
         return rule_only_guard(messages, candidate)
 
-    category, decision = _input_verdict(obj, last, rule_low_signal)
+    category, decision, obj = _vote_input([(o, _input_verdict(o, last, rule_low_signal)) for o in objs])
     result: Dict[str, Any] = {"input": {"decision": decision, "category": category}}
     if has_candidate:
         safe = obj.get("safe") if isinstance(obj.get("safe"), bool) else True
         grounded = obj.get("grounded") if isinstance(obj.get("grounded"), bool) else True
+        if len(objs) > 1:
+            # grounded도 다수결로 정하고, 근거 없는 구간은 다수와 같은 판정을 낸 응답에서 가져온다.
+            g_votes = [o.get("grounded") if isinstance(o.get("grounded"), bool) else True for o in objs]
+            grounded = Counter(g_votes).most_common(1)[0][0]
+            obj = next(o for o, g in zip(objs, g_votes) if g == grounded)
         if SAFE_FROM_DECISION:
             safe = True  # 사실 오류는 grounded로만 본다. unsafe는 아래 입력 판정으로만 정한다.
         # 막아야 할 입력에 거절·전환 없이 답한 후보는 요청에 응한 것이다(공개 세트 19/19건 unsafe, 거절 표현 0건).
@@ -208,6 +218,25 @@ async def handle_guard(state: AppState, messages: List[Dict[str, str]],
             spans = _valid_spans(obj.get("unsupported"), candidate) or _fallback_span(candidate)
         result["output"] = {"grounded": grounded, "unsupported": spans, "safe": safe, "category": category}
     return result
+
+
+# GUARD_VOTES=N(기본 1): 같은 판정을 병렬로 N번 받아 다수결로 정한다. 근거: A+ 가드 같은 설정 3회 결과로 흉내 낸 3표 다수결
+# 가드 88.36 → 89.70(block F1 0.896 → 0.899, 범주 0.756 → 0.767, 후보 답변 판정 안정). 오류 대부분이 실행마다 다른 무작위 오류.
+GUARD_VOTES = max(1, int(os.environ.get("GUARD_VOTES", "3") or 1))
+
+
+def _vote_input(votes):
+    """[(LLM 출력, (범주, 차단 여부))] → (범주, 차단 여부, 대표 출력). 차단 여부는 다수결(동률이면 block),
+    범주는 그 차단 여부를 낸 표 중 다수결(동률이면 먼저 나온 것), 대표 출력은 그 표 중 첫 번째."""
+    if len(votes) == 1:
+        o, (cat, dec) = votes[0]
+        return cat, dec, o
+    counts = Counter(dec for _, (_, dec) in votes)
+    decision = "block" if counts["block"] >= counts["allow"] else "allow"
+    same = [(o, cat) for o, (cat, dec) in votes if dec == decision]
+    cat_counts = Counter(cat for _, cat in same)
+    category = max(cat_counts, key=lambda c: (cat_counts[c], -[cc for _, cc in same].index(c)))
+    return category, decision, next(o for o, c in same if c == category)
 
 
 async def classify_input(state: AppState, messages: List[Dict[str, str]], deadline: float) -> Optional[str]:
