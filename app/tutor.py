@@ -150,7 +150,7 @@ def _verified_quotes(state: AppState, obj: Dict[str, Any], candidates: List[str]
 # ("자료에는 "…"라고 나와 있어요."). 정답 사실은 대부분 자료 문장을 풀어 쓴 것이라 맞는 섹션의 원문을 넣으면 담길
 # 확률이 높고, 덧붙이는 내용이 인용 섹션의 원문뿐이라 근거 충실도 지킨다(자기 말로 늘려 쓰다 실패한 TUTOR_FACTS와 다름).
 # 답변에 그 문장 내용이 이미 60% 이상 있거나, 표 행이거나, 160자를 넘으면 붙이지 않는다.
-TUTOR_QUOTE_IN_ANSWER = os.environ.get("TUTOR_QUOTE_IN_ANSWER", "0") == "1"
+TUTOR_QUOTE_IN_ANSWER = os.environ.get("TUTOR_QUOTE_IN_ANSWER", "1") == "1"
 TUTOR_DEBUG = os.environ.get("TUTOR_DEBUG", "0") == "1"  # 개발용: 바뀌기 전 답변 등을 _debug에 남김(채점 서버에서는 끔)
 
 
@@ -320,7 +320,7 @@ async def _vote(state: AppState, messages: List[Dict[str, str]], deadline: float
 # 범주 정의·차단 판단 지침을 뺀 짧은 답변 전용 프롬프트로 만든다(두 호출 병렬). 지금 튜터 프롬프트는 범주·차단·근거 지침이
 # 한데 섞여 길고, 손실이 가장 큰 곳이 action 오류와 공격 문항 응함이다. 공격 범주는 고정 문구로 답한다.
 # 답변 쪽 문제 요구도 합집합으로 반영해 공격을 놓치지 않게 한다. TUTOR_VOTE와 함께 켜지 않는다.
-TUTOR_ROUTE = os.environ.get("TUTOR_ROUTE", "0") == "1"
+TUTOR_ROUTE = os.environ.get("TUTOR_ROUTE", "1") == "1"
 ANSWER_PROMPT = f"""너는 온라인 학습 플랫폼(LXP) 강의 페이지에 붙어 있는 AI 튜터다. 학습자는 중·고등학생이다.
 학습자는 지금 보고 있는 실습·예제·퀴즈를 네가 안다고 여기고 말한다. 학습자가 말한 실습·예제·상품 이름과 대화 이력을 단서로 [자료]에서 해당 섹션을 찾는다.
 과정에 나오는 은행·가게·인물·모듈·AI 도구 이름과 값은 실제가 아니라 [자료]에 적힌 것이 정답이다.
