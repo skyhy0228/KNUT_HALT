@@ -135,7 +135,7 @@ def _valid_spans(spans: Any, candidate: str) -> List[str]:
 # 예측 구간은 정답의 약 1.6배 길이였다. 저장된 가드 결과 5회에 오프라인 적용: 구간 F1 +0.020~+0.028(평균 +0.024).
 # 숫자·인용·코드가 나오기 전까지의, 자료에 있는 낱말로만 된 '…은/는' 주제어만 뗀다. 남는 것이 숫자·단위뿐이면
 # ("1천 원이에요") 그 값이 무엇인지가 주장의 핵심이라 떼지 않는다.
-SPAN_TRIM = os.environ.get("GUARD_SPAN_TRIM", "0") == "1"
+SPAN_TRIM = os.environ.get("GUARD_SPAN_TRIM", "1") == "1"
 _PARTICLES = ("에서는", "에서", "으로는", "으로", "로는", "로", "에는", "는", "은", "이", "가", "을", "를", "의", "에", "도", "와", "과")
 _TOPIC_END = re.compile(r"(?:은|는)$")
 _HAS_LITERAL = re.compile(r"[0-9`'\"‘’“”%]")
@@ -292,7 +292,7 @@ GUARD_DEBUG = os.environ.get("GUARD_DEBUG", "0") == "1"  # 개발용: 표별 LLM
 # 측정(2026-11-17, 가드 교차 검증 2회의 표별 출력에 오프라인 적용, 정답 근거 없음 35건 구간 F1):
 # first 0.614/0.656, union 0.616/0.659, majority 0.653/0.698, medoid 0.676/0.698, shortest 0.647/0.674.
 # medoid + GUARD_SPAN_TRIM 0.736/0.746. 같은 표 출력에 대한 비교라 LLM 흔들림은 섞이지 않았지만 문항 수가 적다.
-SPAN_VOTE = os.environ.get("GUARD_SPAN_VOTE", "first")
+SPAN_VOTE = os.environ.get("GUARD_SPAN_VOTE", "medoid")
 
 
 def _norm_index(text: str):
@@ -363,7 +363,7 @@ GUARD_VOTES = max(1, int(os.environ.get("GUARD_VOTES", "3") or 1))
 # ② 어느 표든 '묻는 항목이 [자료]에 없다'(in_material=false) → out_of_material(규칙을 켜도 공개 12건 중 6건을 normal로 판정)
 # ③ 어느 표든 '본인 정보를 밝혔다'(self_info=true) → pii_disclosure
 # ②·③의 판단 항목은 가드 자신의 프롬프트에만 넣는다(튜터가 쓰는 classify_input 프롬프트는 그대로).
-CAT_RECALL = os.environ.get("GUARD_CAT_RECALL", "0") == "1"
+CAT_RECALL = os.environ.get("GUARD_CAT_RECALL", "1") == "1"
 _ALLOW_DETAIL = ("out_of_material", "pii_disclosure", "answer_seeking", "emotional_distress", "low_signal_input")
 MATERIAL_GUIDE = """[자료 확인] asked에 학습자가 묻는 '정확한 항목'을 짧게 적는다. 그 항목 자체가 [자료]에 적혀 있으면 in_material=true, 관련된 다른 사실만 있고 그 항목은 없으면 false, 수업 내용을 묻는 질문이 아니면 null이다.
 self_info는 학습자가 자기 이름·학교·학년·나이·연락처 같은 본인 정보를 밝혔으면 true, 아니면 false다(다른 사람의 정보는 해당하지 않는다)."""
