@@ -406,7 +406,7 @@ async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline
     if remaining(deadline) < 3:
         return rule_only_tutor(state, messages, candidates)
 
-    examples = state.examples.search(messages, state.settings.fewshot_k)
+    examples = state.examples.search(messages, state.settings.fewshot_k, dedupe=160)
     context = _context(state, candidates)
     prompt = [{"role": "system", "content": ANSWER_PROMPT if TUTOR_ROUTE else SYSTEM_PROMPT},
               {"role": "system", "content": "[자료]\n" + context}]
