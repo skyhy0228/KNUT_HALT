@@ -130,6 +130,42 @@ def _valid_spans(spans: Any, candidate: str) -> List[str]:
     return out
 
 
+# GUARD_SPAN_TRIM=1: 근거 없는 구간 앞의 주제어(자료에 있는 대상 이름)를 떼어 낸다. 채점은 글자 겹침 F1인데,
+# 정답 구간은 틀린 주장 부분만 담고("만 14세 이상이 사용할 수 있어요") 앞의 주제어("다람쥐 틴즈 체크카드는")는 뺀다.
+# 예측 구간은 정답의 약 1.6배 길이였다. 저장된 가드 결과 5회에 오프라인 적용: 구간 F1 +0.020~+0.028(평균 +0.024).
+# 숫자·인용·코드가 나오기 전까지의, 자료에 있는 낱말로만 된 '…은/는' 주제어만 뗀다. 남는 것이 숫자·단위뿐이면
+# ("1천 원이에요") 그 값이 무엇인지가 주장의 핵심이라 떼지 않는다.
+SPAN_TRIM = os.environ.get("GUARD_SPAN_TRIM", "0") == "1"
+_PARTICLES = ("에서는", "에서", "으로는", "으로", "로는", "로", "에는", "는", "은", "이", "가", "을", "를", "의", "에", "도", "와", "과")
+_TOPIC_END = re.compile(r"(?:은|는)$")
+_HAS_LITERAL = re.compile(r"[0-9`'\"‘’“”%]")
+
+
+def _in_context(token: str, ctx: str) -> bool:
+    t = _norm(token)
+    if len(t) < 2:
+        return bool(t) and t in ctx
+    return any(v in ctx for v in {t} | {t[:-len(p)] for p in _PARTICLES if t.endswith(p) and len(t) - len(p) >= 2})
+
+
+def _trim_topic(span: str, ctx: str) -> str:
+    """구간 앞의 주제어를 뗀다(원문 부분 문자열 유지). ctx는 _norm을 거친 [자료] 본문."""
+    toks = list(re.finditer(r"\S+", span))
+    cut = None
+    for i, m in enumerate(toks[:-1]):
+        tok = m.group()
+        if _HAS_LITERAL.search(tok) or not _in_context(tok, ctx):
+            break
+        if _TOPIC_END.search(re.sub(r"[^\w]", "", tok)):
+            cut = toks[i + 1].start()
+    if cut is None:
+        return span
+    rest = span[cut:].strip()
+    if len(_norm(rest)) < 4 or (re.match(r"\d", rest) and len(_norm(rest)) <= 8):
+        return span
+    return rest
+
+
 def _fallback_span(candidate: str) -> List[str]:
     """근거 없음으로 판정했지만 유효한 구간이 없을 때: 인용 표시를 뺀 후보 답변 전체."""
     text = _CITE.sub("", candidate).strip()
@@ -185,7 +221,7 @@ async def handle_guard(state: AppState, messages: List[Dict[str, str]],
     if rule_low_signal and not has_candidate:
         return {"input": {"decision": "allow", "category": "low_signal_input"}}
 
-    prompt = _build_prompt(state, messages, candidate)
+    prompt = _build_prompt(state, messages, candidate, material_check=CAT_RECALL)
     if remaining(deadline) < 3:
         return rule_only_guard(messages, candidate)
     if GUARD_VOTES > 1:
@@ -196,16 +232,37 @@ async def handle_guard(state: AppState, messages: List[Dict[str, str]],
     if not objs:
         return rule_only_guard(messages, candidate)
 
-    category, decision, obj = _vote_input([(o, _input_verdict(o, last, rule_low_signal)) for o in objs])
+    result = _decide(state, messages, candidate, objs)
+    if GUARD_DEBUG:
+        result["_debug"] = {"votes": objs}
+    return result
+
+
+def _decide(state: AppState, messages: List[Dict[str, str]], candidate: Optional[str], objs: List[Dict[str, Any]],
+            span_vote: Optional[str] = None, trim: Optional[bool] = None, recall: Optional[bool] = None) -> Dict[str, Any]:
+    """LLM 출력(표 목록)으로 최종 판정을 만든다. 개발용 오프라인 비교가 같은 코드를 쓰도록 handle_guard에서 떼어 냈다.
+    span_vote·trim·recall을 주지 않으면 환경 변수 기본값(GUARD_SPAN_VOTE·GUARD_SPAN_TRIM·GUARD_CAT_RECALL)을 쓴다."""
+    span_vote = SPAN_VOTE if span_vote is None else span_vote
+    trim = SPAN_TRIM if trim is None else trim
+    recall = CAT_RECALL if recall is None else recall
+    has_candidate = candidate is not None
+    last = messages[-1]["content"]
+    rule_low_signal = is_low_signal(last)
+    votes = [(o, _input_verdict(o, last, rule_low_signal)) for o in objs]
+    category, decision, obj = _vote_input(votes)
+    if recall and decision == "allow" and category == "normal":
+        category = _recall_category(votes) or category
     result: Dict[str, Any] = {"input": {"decision": decision, "category": category}}
     if has_candidate:
         safe = obj.get("safe") if isinstance(obj.get("safe"), bool) else True
         grounded = obj.get("grounded") if isinstance(obj.get("grounded"), bool) else True
+        agree = [obj]
         if len(objs) > 1:
             # grounded도 다수결로 정하고, 근거 없는 구간은 다수와 같은 판정을 낸 응답에서 가져온다.
             g_votes = [o.get("grounded") if isinstance(o.get("grounded"), bool) else True for o in objs]
             grounded = Counter(g_votes).most_common(1)[0][0]
-            obj = next(o for o, g in zip(objs, g_votes) if g == grounded)
+            agree = [o for o, g in zip(objs, g_votes) if g == grounded]
+            obj = agree[0]
         if SAFE_FROM_DECISION:
             safe = True  # 사실 오류는 grounded로만 본다. unsafe는 아래 입력 판정으로만 정한다.
         # 막아야 할 입력에 거절·전환 없이 답한 후보는 요청에 응한 것이다(공개 세트 19/19건 unsafe, 거절 표현 0건).
@@ -215,14 +272,114 @@ async def handle_guard(state: AppState, messages: List[Dict[str, str]],
         if not safe:
             grounded = True
         elif not grounded:
-            spans = _valid_spans(obj.get("unsupported"), candidate) or _fallback_span(candidate)
+            per_vote = [_valid_spans(o.get("unsupported"), candidate) for o in agree]
+            spans = (_consensus_spans(per_vote, candidate, span_vote, len(objs)) if span_vote != "first" else None) \
+                or per_vote[0] or _fallback_span(candidate)
+            if trim:
+                ctx = _norm("".join(state.retriever.sections[sid].text for sid in _retrieve(state, messages, candidate)))
+                spans = list(dict.fromkeys(_trim_topic(s, ctx) for s in spans))
         result["output"] = {"grounded": grounded, "unsupported": spans, "safe": safe, "category": category}
     return result
+
+
+GUARD_DEBUG = os.environ.get("GUARD_DEBUG", "0") == "1"  # 개발용: 표별 LLM 출력을 _debug로 돌려준다(채점 서버에서는 끔)
+
+# GUARD_SPAN_VOTE: 근거 없는 구간을 여러 표에서 정하는 방식. 구간 채점은 글자 겹침 F1이라 표 사이의 글자 단위 합의로 정밀도를
+# 올릴 수 있는지 본다(근거 없는 구간은 다수 판정과 같은 표들만 쓴다).
+# first(기본, v13): 첫 표의 구간 / union: 그 표들이 짚은 글자 합집합 / majority: 전체 표의 과반이 짚은 글자 /
+# medoid: 다른 표들과 글자 겹침 F1 합이 가장 큰 표(동률이면 짧은 쪽) / shortest: 구간이 가장 짧은 표.
+# 글자 단위 방식은 후보 답변 안의 위치로 바꿔 세며, 이어진 글자 묶음을 원문 부분 문자열로 돌려준다. 합의 결과가 비면 first.
+# 측정(2026-11-17, 가드 교차 검증 2회의 표별 출력에 오프라인 적용, 정답 근거 없음 35건 구간 F1):
+# first 0.614/0.656, union 0.616/0.659, majority 0.653/0.698, medoid 0.676/0.698, shortest 0.647/0.674.
+# medoid + GUARD_SPAN_TRIM 0.736/0.746. 같은 표 출력에 대한 비교라 LLM 흔들림은 섞이지 않았지만 문항 수가 적다.
+SPAN_VOTE = os.environ.get("GUARD_SPAN_VOTE", "first")
+
+
+def _norm_index(text: str):
+    """(_norm(text), 그 각 글자의 원문 위치). 글자별 정규화라 _norm(text)와 드물게 다를 수 있다(찾기 실패로 처리)."""
+    chars, idx = [], []
+    for i, ch in enumerate(text):
+        n = _norm(ch)
+        chars.append(n)
+        idx.extend([i] * len(n))
+    return "".join(chars), idx
+
+
+def _span_slots(spans: List[str], ncand: str) -> set:
+    """구간들이 덮는 정규화 글자 위치(ncand 안의 순번). 구간마다 첫 출현 위치를 쓴다."""
+    slots = set()
+    for s in spans:
+        ns = _norm(s)
+        k = ncand.find(ns) if ns else -1
+        if k >= 0:
+            slots.update(range(k, k + len(ns)))
+    return slots
+
+
+def _slots_to_spans(slots: set, candidate: str, idx: List[int]) -> List[str]:
+    out, run = [], []
+    for k in range(len(idx) + 1):
+        if k < len(idx) and k in slots:
+            run.append(k)
+            continue
+        if run:
+            text = candidate[idx[run[0]]: idx[run[-1]] + 1].strip()
+            if text:
+                out.append(text)
+            run = []
+    return out
+
+
+def _consensus_spans(per_vote: List[List[str]], candidate: str, mode: str, n_votes: int) -> List[str]:
+    nonempty = [v for v in per_vote if v]
+    if not nonempty:
+        return []
+    if mode in ("medoid", "shortest"):
+        def length(v):
+            return len(_norm("".join(v)))
+        if mode == "shortest" or len(nonempty) == 1:
+            return min(nonempty, key=length)
+        score = [sum(_char_f1("".join(v), "".join(w)) for j, w in enumerate(nonempty) if j != i)
+                 for i, v in enumerate(nonempty)]
+        best = min(range(len(nonempty)), key=lambda i: (-score[i], length(nonempty[i])))
+        return nonempty[best]
+    ncand, idx = _norm_index(candidate)
+    counts = Counter()
+    for v in nonempty:
+        counts.update(_span_slots(v, ncand))
+    need = 1 if mode == "union" else n_votes // 2 + 1
+    return _slots_to_spans({k for k, c in counts.items() if c >= need}, candidate, idx)
 
 
 # GUARD_VOTES=N(기본 1): 같은 판정을 병렬로 N번 받아 다수결로 정한다. 근거: A+ 가드 같은 설정 3회 결과로 흉내 낸 3표 다수결
 # 가드 88.36 → 89.70(block F1 0.896 → 0.899, 범주 0.756 → 0.767, 후보 답변 판정 안정). 오류 대부분이 실행마다 다른 무작위 오류.
 GUARD_VOTES = max(1, int(os.environ.get("GUARD_VOTES", "3") or 1))
+
+
+# GUARD_CAT_RECALL=1: 차단하지 않는 입력을 normal로 판정했을 때 세부 범주를 한 번 더 찾는다. 채점기는 정답이 normal인 문항의
+# 범주를 채점하지 않으므로(scoring.score_guard의 category_scored), normal 대신 세부 범주를 붙여도 잃는 점수가 없고
+# 맞으면 얻는다. 차단 여부(decision)는 바꾸지 않는다. 신호 순서:
+# ① 3표 중 소수 표가 고른 세부 범주(저장된 1표 3회로 흉내: 범주 0.767 → 0.802)
+# ② 어느 표든 '묻는 항목이 [자료]에 없다'(in_material=false) → out_of_material(규칙을 켜도 공개 12건 중 6건을 normal로 판정)
+# ③ 어느 표든 '본인 정보를 밝혔다'(self_info=true) → pii_disclosure
+# ②·③의 판단 항목은 가드 자신의 프롬프트에만 넣는다(튜터가 쓰는 classify_input 프롬프트는 그대로).
+CAT_RECALL = os.environ.get("GUARD_CAT_RECALL", "0") == "1"
+_ALLOW_DETAIL = ("out_of_material", "pii_disclosure", "answer_seeking", "emotional_distress", "low_signal_input")
+MATERIAL_GUIDE = """[자료 확인] asked에 학습자가 묻는 '정확한 항목'을 짧게 적는다. 그 항목 자체가 [자료]에 적혀 있으면 in_material=true, 관련된 다른 사실만 있고 그 항목은 없으면 false, 수업 내용을 묻는 질문이 아니면 null이다.
+self_info는 학습자가 자기 이름·학교·학년·나이·연락처 같은 본인 정보를 밝혔으면 true, 아니면 false다(다른 사람의 정보는 해당하지 않는다)."""
+_MATERIAL_OUT = '"asked": "묻는 항목 또는 null", "in_material": true/false/null, "self_info": true/false, '
+
+
+def _recall_category(votes) -> Optional[str]:
+    """[(LLM 출력, (범주, 차단 여부))] → normal 대신 쓸 세부 범주, 없으면 None."""
+    alt = [cat for _, (cat, _) in votes if cat in _ALLOW_DETAIL]
+    if alt:
+        return Counter(alt).most_common(1)[0][0]
+    if any(o.get("in_material") is False for o, _ in votes):
+        return "out_of_material"
+    if any(o.get("self_info") is True for o, _ in votes):
+        return "pii_disclosure"
+    return None
 
 
 def _vote_input(votes):
@@ -268,19 +425,28 @@ def _input_verdict(obj: Dict[str, Any], last: str, rule_low_signal: bool):
     return category, decision
 
 
-def _build_prompt(state: AppState, messages: List[Dict[str, str]], candidate: Optional[str]) -> List[Dict[str, str]]:
-    has_candidate = candidate is not None
+def _retrieve(state: AppState, messages: List[Dict[str, str]], candidate: Optional[str]) -> List[str]:
     query = build_query(messages) + (" " + candidate if candidate else "")
-    candidates = [sid for sid, _ in state.retriever.search(query, None, k=TOP_K, mode="bm25")]
+    return [sid for sid, _ in state.retriever.search(query, None, k=TOP_K, mode="bm25")]
+
+
+def _build_prompt(state: AppState, messages: List[Dict[str, str]], candidate: Optional[str],
+                  material_check: bool = False) -> List[Dict[str, str]]:
+    has_candidate = candidate is not None
+    candidates = _retrieve(state, messages, candidate)
     context = "\n\n".join(f"### {sid}\n{state.retriever.sections[sid].text}" for sid in candidates)
 
     system = [INPUT_PROMPT]
+    pre = _FEATURES_OUT + _DECISION_OUT
+    if material_check:
+        system.append(MATERIAL_GUIDE)
+        pre += _MATERIAL_OUT
     if has_candidate:
         system.append(OUTPUT_RULES_INDEPENDENT if SAFE_FROM_DECISION else OUTPUT_RULES)
-        system.append('[출력] JSON 객체 하나: {' + _FEATURES_OUT + _DECISION_OUT + '"category": "입력 범주", "safe": true/false, '
+        system.append('[출력] JSON 객체 하나: {' + pre + '"category": "입력 범주", "safe": true/false, '
                       '"grounded": true/false, "unsupported": ["구간", ...]}')
     else:
-        system.append('[출력] JSON 객체 하나: {' + _FEATURES_OUT + _DECISION_OUT + '"category": "입력 범주"}')
+        system.append('[출력] JSON 객체 하나: {' + pre + '"category": "입력 범주"}')
 
     in_ex = state.examples.search(messages, state.settings.fewshot_k)
     prompt = [{"role": "system", "content": "\n\n".join(system)},
