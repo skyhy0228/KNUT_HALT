@@ -371,10 +371,18 @@ graded_work(제출할 숙제·과제·시험 답안을 대신 완성), other_per
 {{"notes": [{{"id": "섹션 ID", "same": true/false, "answer": true/false}}, ...], "problems": ["graded_work|other_person_info|deceive_or_harm|insult|bypass_rules|non_course_output", ...], "asked": "묻는 항목 또는 null", "in_material": true/false/null, "category": "normal|pii_disclosure|answer_seeking|out_of_material", "quotes": [{{"id": "섹션 ID", "text": "[자료]에서 그대로 복사한 문장"}}], "answer": "학습자에게 보여 줄 답변"}}"""
 _ROUTE_BENIGN = ("normal", "pii_disclosure", "answer_seeking", "out_of_material")
 
+# TUTOR_OOM_UNION=1(v17): 판정(classify_input)이 out_of_material이면 답변 쪽이 normal·pii_disclosure여도 '자료에 없음'으로 본다.
+# v15까지는 자료 밖 판단을 답변 호출 하나가 정했다. 근거(D1, 2026-11-19): 공개 튜터 200문항 × 3회의 두 호출 출력을 저장하고
+# 같은 출력으로 합치기 규칙만 바꿔 실제 handle_tutor로 재생(그룹 분할 예시 풀) — action 188→189, 187→188, 191→192,
+# 로컬(action·인용) 회차마다 +0.50, 정상 질문을 abstain으로 바꾼 경우 0/600, 공격 놓침·과잉 거절·인용 변화 없음.
+# 두 폴드 모두에서 고른 유일한 규칙이지만 바뀐 문항이 2개뿐이라 근거는 약하다. 0이면 v15와 같다.
+TUTOR_OOM_UNION = os.environ.get("TUTOR_OOM_UNION", "1") == "1"
+
 
 async def _route(deadline: float, base: str, cls_task: "asyncio.Future") -> str:
     """판정(classify_input)과 답변 쪽 범주를 합친다. 공격·정서 위기는 어느 쪽이든 따르고(합집합),
-    정답만 요구도 어느 쪽이든 따른다. 그 밖에는 답변 쪽(정상·자기소개·자료에 없음)을 따른다."""
+    정답만 요구도 어느 쪽이든 따른다. 그 밖에는 답변 쪽(정상·자기소개·자료에 없음)을 따르되,
+    TUTOR_OOM_UNION이면 판정 쪽의 '자료에 없음'도 따른다."""
     try:
         cls = await asyncio.wait_for(cls_task, timeout=max(0.1, remaining(deadline) - 1.0))
     except Exception:  # 시간 초과·호출 실패 → 답변 쪽 판정만 사용
@@ -388,6 +396,8 @@ async def _route(deadline: float, base: str, cls_task: "asyncio.Future") -> str:
         return "answer_seeking"
     if cls == "pii_disclosure" and base == "normal":
         return "pii_disclosure"
+    if TUTOR_OOM_UNION and cls == "out_of_material" and base in ("normal", "pii_disclosure"):
+        return "out_of_material"
     return base
 
 
