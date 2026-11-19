@@ -370,9 +370,34 @@ graded_work(제출할 숙제·과제·시험 답안을 대신 완성), other_per
 [출력] JSON 객체 하나만 출력한다.
 {{"notes": [{{"id": "섹션 ID", "same": true/false, "answer": true/false}}, ...], "problems": ["graded_work|other_person_info|deceive_or_harm|insult|bypass_rules|non_course_output", ...], "asked": "묻는 항목 또는 null", "in_material": true/false/null, "category": "normal|pii_disclosure|answer_seeking|out_of_material", "quotes": [{{"id": "섹션 ID", "text": "[자료]에서 그대로 복사한 문장"}}], "answer": "학습자에게 보여 줄 답변"}}"""
 _ROUTE_BENIGN = ("normal", "pii_disclosure", "answer_seeking", "out_of_material")
+# TUTOR_ROUTE_GUARD=1 (A안, 기본 켬): 막기·정서 위기·정답만 요구는 가드 쪽 판정만 따르고, 답변 쪽 판정은 정상·본인 정보·
+# 자료에 없음만 정한다. 근거(11-19, v16.1 공개 세트 그룹 분할 교차 검증): 답변 쪽이 혼자 잡은 막기·정서 위기·정답만 요구 0/55건,
+# 오탐 3건(정상 질문을 정답만 요구로 2, 자료 밖 질문을 off_topic으로 1). 같은 LLM 출력 짝 비교: action 180 → 183/200,
+# 고침 3·망침 0(튜터 약 +0.4, 추정). 가드 쪽 판정이 실패(None)하면 기존 규칙(합집합)을 쓴다. 0이면 v16.1과 같다.
+TUTOR_ROUTE_GUARD = os.environ.get("TUTOR_ROUTE_GUARD", "1") == "1"
+# TUTOR_ROUTE_GUARDVOTE=1 (B안, 기본 꺼짐): 라우팅의 가드 쪽 판정을 /guard와 같은 입력 판정(GUARD_VOTES표 다수결,
+# 범주 재탐색 포함)으로 받는다. 끄면 기존 classify_input 1회. 튜터 요청당 LLM 호출이 GUARD_VOTES-1회 늘어난다(병렬).
+# 11-19 측정(같은 3표의 표별 1표와 짝 비교): 튜터 +0.3~0.5(추정)로 실행 간 차이(0.34)와 구분되지 않고, 호출 증가로
+# 동시 64 지연 위험이 있어(v16.1 실제 채점 튜터 p95 21.2초) 기본은 끈다. 켜려면 동시 64 부하 테스트를 먼저 한다.
+TUTOR_ROUTE_GUARDVOTE = os.environ.get("TUTOR_ROUTE_GUARDVOTE", "0") == "1"
 
 
-async def _route(deadline: float, base: str, cls_task: "asyncio.Future") -> str:
+async def _guard_category(state: AppState, messages: List[Dict[str, str]], deadline: float) -> Optional[str]:
+    """B안: /guard(handle_guard)와 같은 입력 판정의 최종 범주. LLM 표가 하나도 없으면 None(규칙 대체 응답은 쓰지 않음)."""
+    from .guard import CAT_RECALL, GUARD_VOTES, _build_prompt, _decide
+    if not messages:
+        return None
+    if is_low_signal(messages[-1]["content"]):
+        return "low_signal_input"
+    prompt = _build_prompt(state, messages, None, material_check=CAT_RECALL)
+    objs = [o for o in await asyncio.gather(*[state.llm.chat_json(prompt, deadline) for _ in range(GUARD_VOTES)])
+            if o is not None]
+    if not objs:
+        return None
+    return (_decide(state, messages, None, objs).get("input") or {}).get("category")
+
+
+async def _route(deadline: float, base: str, cls_task: "asyncio.Future", llm_category: Optional[str] = None) -> str:
     """판정(classify_input)과 답변 쪽 범주를 합친다. 공격·정서 위기는 어느 쪽이든 따르고(합집합),
     정답만 요구도 어느 쪽이든 따른다. 그 밖에는 답변 쪽(정상·자기소개·자료에 없음)을 따른다."""
     try:
@@ -382,6 +407,13 @@ async def _route(deadline: float, base: str, cls_task: "asyncio.Future") -> str:
         cls = None
     if cls in BLOCK_CATEGORIES or cls in ("emotional_distress", "low_signal_input"):
         return cls
+    if TUTOR_ROUTE_GUARD and cls is not None:
+        side = llm_category if llm_category in ("normal", "pii_disclosure", "out_of_material") else "normal"
+        if cls == "answer_seeking":
+            return "answer_seeking"
+        if cls == "pii_disclosure" and side == "normal":
+            return "pii_disclosure"
+        return side
     if base in BLOCK_CATEGORIES or base == "emotional_distress":
         return base
     if "answer_seeking" in (cls, base):
@@ -389,6 +421,24 @@ async def _route(deadline: float, base: str, cls_task: "asyncio.Future") -> str:
     if cls == "pii_disclosure" and base == "normal":
         return "pii_disclosure"
     return base
+
+
+def _debug_extra(state, obj, ranked, candidates, cls_task, llm_category, probs, base, category,
+                 harmful_type, answer_llm) -> Dict[str, Any]:
+    """TUTOR_DEBUG=1 전용(개발용, 공개 세트 교차 검증): 같은 LLM 출력에 규칙만 바꿔 짝 비교할 중간값."""
+    cls = None
+    if cls_task is not None and cls_task.done() and not cls_task.cancelled():
+        try:
+            cls = cls_task.result()
+        except Exception:
+            cls = None
+    return {"ranked": [[sid, round(float(score), 4)] for sid, score in ranked],
+            "llm_category": llm_category, "probs": probs, "base": base, "cls": cls,
+            "category": category, "harmful_type": harmful_type,
+            "in_material": obj.get("in_material"), "asked": obj.get("asked"),
+            "notes": obj.get("notes"), "quotes_raw": obj.get("quotes"),
+            "quotes_verified": [[sid, text] for sid, text in _verified_quotes(state, obj, candidates)],
+            "answer_llm": answer_llm}
 
 
 async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline: float) -> Dict[str, Any]:
@@ -416,7 +466,8 @@ async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline
                        + format_tutor_examples(examples)})
     prompt.extend(messages)
 
-    cls_task = (asyncio.ensure_future(classify_input(state, messages, deadline))
+    cls_fn = _guard_category if (TUTOR_ROUTE and TUTOR_ROUTE_GUARDVOTE) else classify_input
+    cls_task = (asyncio.ensure_future(cls_fn(state, messages, deadline))
                 if (TUTOR_VOTE or TUTOR_ROUTE) else None)
     obj = await state.llm.chat_json(prompt, deadline)
     if obj is None:
@@ -434,13 +485,15 @@ async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline
         base = PROBLEM_TYPES[probs[0]] if probs else base
     elif TUTOR_PROBLEMS:
         base = _problem_category(obj, base)
+    base_dbg, probs_dbg = base, (probs if TUTOR_ROUTE else None)
     category = rule_adjust(base, messages[-1]["content"])
     if cls_task and TUTOR_ROUTE:
-        category = await _route(deadline, category, cls_task)
+        category = await _route(deadline, category, cls_task, llm_category)
     elif cls_task:
         category = await _vote(state, messages, deadline, category, cls_task)
     answer = obj.get("answer") if isinstance(obj.get("answer"), str) else ""
     answer = answer.strip()
+    answer_llm = answer  # TUTOR_DEBUG 기록용: 규칙·고정 문구로 바뀌기 전 LLM 답변
     if category == "out_of_material" and llm_category != "out_of_material":
         answer = ""  # 정상 답으로 쓴 글 대신 아래에서 '○○은 자료에 없어요' 형식으로 채운다.
     # 규칙이 범주를 바꿨다면 LLM 답변은 다른 범주 기준으로 쓴 것이다(예: 요청에 응한 답).
@@ -502,5 +555,7 @@ async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline
     result = {"answer": answer, "action": action, "citations": citations}
     if TUTOR_DEBUG:
         result["_debug"] = {"answer_before": before, "quote_added": answer != before,
-                            "seek_off": seek_off, "seek_on": seek_on}
+                            "seek_off": seek_off, "seek_on": seek_on,
+                            **_debug_extra(state, obj, ranked, candidates, cls_task, llm_category,
+                                           probs_dbg, base_dbg, category, harmful_type, answer_llm)}
     return result
