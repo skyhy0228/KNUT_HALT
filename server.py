@@ -12,8 +12,14 @@
 import asyncio
 import json
 import logging
+import os
 import secrets
 import time
+
+# v16: 키워드 보정 규칙(RULES)을 기본으로 끈다. app 패키지를 불러오기 전에 정해야 적용된다.
+# 공개 세트에 맞춘 정규식 보정은 비공개 문항으로 효과가 옮겨 가지 않는다(version-history-report v6).
+# 다시 켜려면: RULES=1 ./run.sh
+os.environ.setdefault("RULES", "0")
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
