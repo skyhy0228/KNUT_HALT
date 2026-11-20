@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 
 from .examples import format_guard_input_examples, format_guard_output_examples
 from .llm import remaining
+from .kbprep import _on as _kbprep_on
 from .policy import (CATEGORY_AFTER_DECISION, CATEGORY_GUIDE, DECISION_GUIDE, PROBLEM_TYPES, CLASSIFY_FEATURES, FEATURE_GUIDE, FEATURES_JSON, coerce_category, decision_for,
                      features_to_category, has_refusal_cue, is_low_signal, rule_adjust, rule_category)
 from .schemas import BLOCK_CATEGORIES, guard_fallback
@@ -294,8 +295,24 @@ def _decide(state: AppState, messages: List[Dict[str, str]], candidate: Optional
             if trim:
                 ctx = _norm("".join(state.retriever.sections[sid].text for sid in _retrieve(state, messages, candidate)))
                 spans = list(dict.fromkeys(_trim_topic(s, ctx) for s in spans))
+            prep = state.retriever.prep
+            if prep is not None and _kbprep_on("E11"):
+                # v23 E-11: [자료]와 질문 어디에도 없는 숫자+단위 값이 든 구간은 그 값 구절(앞 수식어 두 낱말까지)로 줄인다.
+                wv = prep.wrong_value_spans(candidate, _retrieve(state, messages, candidate), messages[-1]["content"])
+                spans = _merge_value_spans(spans, wv)
         result["output"] = {"grounded": grounded, "unsupported": spans, "safe": safe, "category": category}
     return result
+
+
+def _merge_value_spans(spans: List[str], wv: List[str]) -> List[str]:
+    """구간 안에 틀린 값 구절이 있으면 그 구절들로 바꾼다. 값 구절이 없는 구간은 그대로 둔다."""
+    if not wv:
+        return spans
+    out = []
+    for sp in spans:
+        inside = [w for w in wv if _norm(w) and _norm(w) in _norm(sp)]
+        out += inside or [sp]
+    return list(dict.fromkeys(out))
 
 
 GUARD_DEBUG = os.environ.get("GUARD_DEBUG", "0") == "1"  # 개발용: 표별 LLM 출력을 _debug로 돌려준다(채점 서버에서는 끔)

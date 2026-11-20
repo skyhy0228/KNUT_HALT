@@ -58,20 +58,32 @@ class Retriever:
     def __init__(self, sections: Dict[str, Section]):
         self.sections = sections
         self.section_ids = list(sections)
-        self.bm25 = BM25([tokenize(sections[s].text) for s in self.section_ids])
         self.chunks = [c for s in self.section_ids for c in sections[s].chunks]
+        self.index: Optional[faiss.Index] = None
+        self.prep = None
+        from .kbprep import KBPREP, KBPrep
+        if KBPREP:
+            # v23 KB 전처리: 섹션·청크 BM25를 전처리한 색인 글(표 문장, 상투 문구 뺌, 숫자 정규화 토큰)로 만든다.
+            self.prep = KBPrep(sections)
+            self.bm25 = BM25([self.prep._toks(self.prep.section_index_text[s]) for s in self.section_ids])
+            self.bm25_chunks = BM25([self.prep._toks(t) for t in self.prep.chunk_index_text])
+            self.prep.section_bm25, self.prep.chunk_bm25 = self.bm25, self.bm25_chunks
+            return
+        self.bm25 = BM25([tokenize(sections[s].text) for s in self.section_ids])
         # 청크 BM25(소제목 + 본문): 섹션 점수 = 그 섹션 청크 중 최고점. 튜터 인용 우선 섹션 고르기(TUTOR_CITE_CHUNK)에 쓴다.
         self.bm25_chunks = BM25([tokenize((c.heading or "") + "\n" + c.text) for c in self.chunks])
-        self.index: Optional[faiss.Index] = None
+
+    def _qtoks(self, query: str) -> List[str]:
+        return self.prep._toks(self.prep.query_text(query)) if self.prep else tokenize(query)
 
     # ---- BM25 ----
     def search_bm25(self, query: str, k: int = 10) -> Ranked:
-        sc = self.bm25.scores(tokenize(query))
+        sc = self.bm25.scores(self._qtoks(query))
         order = np.argsort(-sc)[:k]
         return [(self.section_ids[i], float(sc[i])) for i in order if sc[i] > 0]
 
     def search_bm25_chunks(self, query: str, k: int = 10) -> Ranked:
-        sc = self.bm25_chunks.scores(tokenize(query))
+        sc = self.bm25_chunks.scores(self._qtoks(query))
         best: Dict[str, float] = {}
         for i in np.argsort(-sc):
             if sc[i] <= 0 or len(best) >= k:

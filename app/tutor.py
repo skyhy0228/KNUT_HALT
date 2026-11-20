@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional
 from .examples import format_tutor_examples
 from .llm import remaining
 from .retrieval import rrf
+from .kbprep import _on as _kbprep_on
 from .policy import (CATEGORY_AFTER_DECISION, CATEGORY_GUIDE, CITING_ACTIONS, CLASSIFY_FEATURES, DECISION_GUIDE,
                      FEATURE_GUIDE, FEATURES_JSON, PROBLEM_TYPES, TEMPLATES, action_for, coerce_category,
                      features_to_category, harmful_type_for, is_low_signal, refusal_template, rule_adjust,
@@ -293,11 +294,15 @@ def _name_missing_item(answer: str, asked) -> str:
     return head + (" " + answer[m.end():].strip() if answer[m.end():].strip() else "") if m else answer
 
 
-def _context(state: AppState, section_ids: List[str]) -> str:
+def _context(state: AppState, section_ids: List[str], query: Optional[str] = None) -> str:
     if TUTOR_CTX:
         label = lambda i: "(검색 1위)" if i == 0 else "(참고용: 이름이 같은 다른 예제·상품일 수 있음)"
-        return "\n\n".join(f"### {sid} {label(i)}\n{state.retriever.sections[sid].text}"
-                           for i, sid in enumerate(section_ids))
+        prep = state.retriever.prep
+
+        def body(i, sid):  # v23 A-1: 2·3위 섹션은 질문과 맞는 소제목만(1위 섹션은 전문)
+            ex = prep.section_excerpt(sid, query) if (prep is not None and query and i > 0) else None
+            return ex or state.retriever.sections[sid].text
+        return "\n\n".join(f"### {sid} {label(i)}\n{body(i, sid)}" for i, sid in enumerate(section_ids))
     return "\n\n".join(f"### {sid}\n{state.retriever.sections[sid].text}" for sid in section_ids)
 
 
@@ -445,15 +450,26 @@ ENG_RATIO_MIN, ENG_MIN_LETTERS, ENG_TRANSLATE_TIMEOUT_S = 0.9, 8, 8.0
 # 근거(2026-11-20, 공개 튜터 중 근거 있는 한국어 115문항, API 없음): 1위 적중 105 → 107(고침 2, 깨짐 0), 1위가 바뀌는 문항 5/194.
 # 기각: 청크 BM25만(고침 3, 깨짐 4), 섹션+청크+임베딩 RRF(깨짐 8), 제목·소제목 BM25 추가(깨짐 11), 상위 3 전체를 RRF로 다시 뽑기(프롬프트 76문항 변경).
 TUTOR_CITE_CHUNK = os.environ.get("TUTOR_CITE_CHUNK", "front")
+# v23 KB 전처리(app/kbprep.py) 기준값: D-10 묻는 항목 글자 비율, B-5 인용을 바꿀 때 필요한 점수 차.
+KBPREP_D10_MIN = float(os.environ.get("KBPREP_D10_MIN", "0.6"))
+KBPREP_B5_MARGIN = float(os.environ.get("KBPREP_B5_MARGIN", "0.0"))
 _TRANSLATE_PROMPT = ("학습자가 영어로 쓴 질문을 한국어로 번역한다. 뜻을 바꾸거나 덧붙이지 않는다. 코드·변수명·파일 이름은 그대로 둔다. "
                      "이름·상품명 같은 고유명사는 한국어로 자연스럽게 옮긴다. JSON 객체 하나로만 답한다: {\"ko\": \"번역문\"}")
 
 
-def _cite_first(state: AppState, query: str, candidates: List[str]) -> List[str]:
+def _cite_first(state: AppState, query: str, candidates: List[str], last: str = "") -> List[str]:
     if len(candidates) < 2:
         return candidates
     R = state.retriever
-    for sid, _ in rrf([R.search_bm25(query, 20), R.search_bm25_chunks(query, 20)]):
+    lists = [R.search_bm25(query, 20), R.search_bm25_chunks(query, 20)]
+    if R.prep is not None:
+        # v23 A-2: 마지막 발화가 FAQ 질문과 아주 비슷하면 그 섹션을 맨 앞에(FAQ 목록을 RRF에 늘 넣으면 공개 세트 1위 적중 107→80).
+        strong = R.prep.faq_strong(last, candidates) if last else None
+        if strong:
+            return [strong] + [c for c in candidates if c != strong]
+        # v23 F-13 코드 식별자 목록, B-4 공통 이름 목록(기본 끔)
+        lists += [x for x in (R.prep.search_code(query), R.prep.search_anchored(query)) if x]
+    for sid, _ in rrf(lists):
         if sid in candidates:
             return [sid] + [c for c in candidates if c != sid]
     return candidates
@@ -531,7 +547,7 @@ async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline
     candidates = [sid for sid, _ in ranked]
     ctx = candidates  # [자료]에 넣는 순서
     if TUTOR_CITE_CHUNK in ("cite", "front") and mode == "bm25":
-        candidates = _cite_first(state, build_query(rmsgs), candidates)  # 인용·근거 문장 우선순위
+        candidates = _cite_first(state, build_query(rmsgs), candidates, last=rmsgs[-1]["content"])  # 인용·근거 문장 우선순위
         if TUTOR_CITE_CHUNK == "front":
             ctx = candidates
     if remaining(deadline) < 3:
@@ -540,7 +556,7 @@ async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline
         return rule_only_tutor(state, messages, candidates)
 
     examples = state.examples.search(messages, state.settings.fewshot_k, dedupe=160)
-    context = _context(state, ctx)
+    context = _context(state, ctx, build_query(rmsgs))
     prompt = [{"role": "system", "content": ANSWER_PROMPT if TUTOR_ROUTE else SYSTEM_PROMPT},
               {"role": "system", "content": "[자료]\n" + context}]
     if examples:
@@ -590,6 +606,13 @@ async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline
     if (QUOTE_CHECK and category in ("normal", "pii_disclosure")
             and not quote_supported(obj.get("evidence_quote"), context)):
         category, answer = "out_of_material", TEMPLATES["abstain"]
+    prep = state.retriever.prep
+    # v23 D-10·F-14: 답변 호출이 '묻는 항목이 자료에 없다(in_material=false)'고 했고, 그 항목(asked)의 글자가
+    # [자료] 섹션들(전처리 색인 글)에 거의 없으면 자료 밖으로 본다. (in_material만 믿는 OOM_CHECK는 정상 질문 오탐이 많아 꺼 둠)
+    if (prep is not None and _kbprep_on("D10") and category in ("normal", "pii_disclosure")
+            and obj.get("in_material") is False and isinstance(obj.get("asked"), str)
+            and prep.coverage(obj["asked"], candidates) < KBPREP_D10_MIN):
+        category, answer = "out_of_material", TEMPLATES["abstain"]
     if OOM_CHECK and category in ("normal", "pii_disclosure") and obj.get("in_material") is False:
         category, answer = "out_of_material", TEMPLATES["abstain"]
     harmful_type = harmful_type_for(messages[-1]["content"]) if category == "harmful_content" else None
@@ -634,6 +657,16 @@ async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline
     before = answer
     if TUTOR_QUOTE_IN_ANSWER and TUTOR_QUOTES and action == "answer" and category in ("normal", "pii_disclosure"):
         answer = _with_quote(answer, _verified_quotes(state, obj, candidates), citations)
+    # v23 B-5: 인용 1위 섹션의 근거 문장과 거의 같은 문장이 다른 섹션에도 있으면, 그 문장 낱말을 뺀 나머지 질문 낱말이
+    # 더 잘 맞는 섹션으로 인용을 바꾼다(같은 사실이라 근거 충실은 유지). 답변 문장은 그대로 둔다.
+    if prep is not None and _kbprep_on("B5") and action in ("answer", "scaffold") and citations:
+        q0 = next((t for sid_, t in _verified_quotes(state, obj, candidates) if sid_ == citations[0]), None)
+        dup = [x for x in prep.same_fact_sections(q0) if x != citations[0]] if q0 else []
+        if dup:
+            ranked = prep.residual_rank(build_query(rmsgs), q0, [citations[0]] + dup)
+            cur = dict(ranked).get(citations[0], 0.0)
+            if ranked and ranked[0][0] != citations[0] and ranked[0][1] > cur + KBPREP_B5_MARGIN:
+                citations = [ranked[0][0]] + [c for c in citations[1:] if c != ranked[0][0]]
     result = {"answer": answer, "action": action, "citations": citations}
     if TUTOR_DEBUG:
         result["_debug"] = {"answer_before": before, "quote_added": answer != before,
