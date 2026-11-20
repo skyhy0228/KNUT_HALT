@@ -40,7 +40,7 @@ class LLM:
         await self.chat.close()
         await self.embed.close()
 
-    async def _chat_once(self, messages, timeout: float, max_tokens: int, json_mode: bool) -> str:
+    async def _chat_once(self, messages, timeout: float, max_tokens: int, json_mode: bool, priority: bool = False) -> str:
         kwargs: Dict[str, Any] = dict(model=self.s.chat_model, messages=messages,
                                       max_completion_tokens=max_tokens,
                                       extra_body={"reasoning_effort": self.s.reasoning_effort})
@@ -49,18 +49,21 @@ class LLM:
         kwargs["timeout"] = timeout  # 요청 단위 상한(클라이언트 기본 상한보다 우선)
 
         async def call():
+            if priority:  # 짧고 드문 호출(튜터의 영어 질문 번역)은 공용 동시 상한 대기열을 건너뛴다.
+                r = await self.chat.chat.completions.create(**kwargs)
+                return r.choices[0].message.content or ""
             async with self.sem:
                 r = await self.chat.chat.completions.create(**kwargs)
                 return r.choices[0].message.content or ""
         return await asyncio.wait_for(call(), timeout=timeout)
 
-    async def _json_once(self, messages, timeout: float, max_tokens: int) -> Dict[str, Any]:
-        obj = json.loads(await self._chat_once(messages, timeout, max_tokens, True))
+    async def _json_once(self, messages, timeout: float, max_tokens: int, priority: bool = False) -> Dict[str, Any]:
+        obj = json.loads(await self._chat_once(messages, timeout, max_tokens, True, priority))
         if not isinstance(obj, dict):
             raise TypeError("json_not_object")
         return obj
 
-    async def _json_hedged(self, messages, deadline: float, max_tokens: int) -> Dict[str, Any]:
+    async def _json_hedged(self, messages, deadline: float, max_tokens: int, priority: bool = False) -> Dict[str, Any]:
         """헤지 요청: 첫 호출이 LLM_HEDGE_AFTER_S초 안에 끝나지 않으면 같은 요청을 한 번 더 보내고
         먼저 성공한 응답을 쓴다(나머지는 취소). 운영진 API는 같은 크기의 요청도 3~23초로 처리 시간이
         크게 흔들려(2026-11-16 측정) 일부 요청이 시간 초과로 대체 답변이 되는 것을 막는다.
@@ -68,8 +71,8 @@ class LLM:
         left = remaining(deadline) - MARGIN_S
         hedge = self.s.llm_hedge_after_s
         if hedge <= 0:
-            return await self._json_once(messages, min(left, self.s.llm_call_timeout_s), max_tokens)
-        first = asyncio.ensure_future(self._json_once(messages, left, max_tokens))
+            return await self._json_once(messages, min(left, self.s.llm_call_timeout_s), max_tokens, priority)
+        first = asyncio.ensure_future(self._json_once(messages, left, max_tokens, priority))
         try:
             return await asyncio.wait_for(asyncio.shield(first), timeout=min(hedge, left))
         except asyncio.TimeoutError:
@@ -79,7 +82,7 @@ class LLM:
         if left2 < HEDGE_MIN_S:
             return await first
         log.warning("llm_hedged")
-        second = asyncio.ensure_future(self._json_once(messages, left2, max_tokens))
+        second = asyncio.ensure_future(self._json_once(messages, left2, max_tokens, priority))
         pending = {first, second}
         last_exc: BaseException = asyncio.TimeoutError()
         try:
@@ -95,15 +98,15 @@ class LLM:
                 t.cancel()
 
     async def chat_json(self, messages: List[Dict[str, str]], deadline: float,
-                        max_tokens: Optional[int] = None) -> Optional[Dict[str, Any]]:
-        """JSON 객체 응답을 받는다. 실패·시간 부족이면 None."""
+                        max_tokens: Optional[int] = None, priority: bool = False) -> Optional[Dict[str, Any]]:
+        """JSON 객체 응답을 받는다. 실패·시간 부족이면 None. priority=True는 동시 상한 대기열을 건너뛴다(짧고 드문 호출만)."""
         max_tokens = max_tokens or self.s.max_completion_tokens
         for attempt in range(2):
             left = remaining(deadline) - MARGIN_S
             if left < (MIN_CALL_S if attempt == 0 else RETRY_MIN_S):
                 return None
             try:
-                return await self._json_hedged(messages, deadline, max_tokens)
+                return await self._json_hedged(messages, deadline, max_tokens, priority)
             except asyncio.TimeoutError:
                 log.warning("llm_timeout attempt=%d", attempt)
                 return None  # 시간 초과 뒤 재시도는 마감을 넘기기 쉽다.

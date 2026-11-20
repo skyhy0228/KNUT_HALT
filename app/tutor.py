@@ -393,6 +393,40 @@ TUTOR_OOM_UNION = os.environ.get("TUTOR_OOM_UNION", "1") == "1"
 # 정상 질문을 scaffold로 바꾸면 action과 정답 사실을 함께 잃고, 정답만 요구를 놓치면 action만 잃는다(비대칭).
 TUTOR_SEEK_FROM = os.environ.get("TUTOR_SEEK_FROM", "union")
 
+# v19: 영어 질문 검색(TUTOR_ENG_TRANSLATE, TUTOR_ENG_MODE). 코드 블록이 없고 글자의 90% 이상이 로마자인 마지막 발화만 해당.
+# 짧은 LLM 호출로 한국어로 옮겨 원문 뒤에 붙인 질의를 BM25 + 임베딩(RRF)으로 찾는다. 답변 프롬프트·인용 규칙은 그대로(원문 사용).
+# 근거(2026-11-20, 공개 세트 영어 튜터 6문항 × 5회, 로컬 판정 2회): 문항 점수 합이 v18 대비 +0.38~+0.45.
+#   번역 + BM25만은 -0.03(번역문이 매번 달라 같은 문항의 정답 섹션이 2~15위로 흔들림), 번역 없이 원문 임베딩 하이브리드는 -0.30.
+#   그래서 번역에 실패하면 v18과 같은 검색(원문 BM25)으로 돌아간다. 코드가 든 영어 질문은 코드 낱말로 이미 잘 찾아 제외한다.
+# 번역 지시에는 KB 고유명사 힌트를 넣지 않는다(일반 번역). 5.5초 안에 못 받거나 남은 시간이 15초 미만이면 번역하지 않는다.
+# 번역 호출은 동시 상한 대기열을 건너뛴다(채점 때는 대기열이 차서 짧은 호출도 제한 시간을 넘기기 쉽다). 영어 질문에만 1회.
+TUTOR_ENG_TRANSLATE = os.environ.get("TUTOR_ENG_TRANSLATE", "1") == "1"
+# 영어 질문의 검색 방식: bm25 | hybrid(BM25 + 임베딩 RRF) | dense. 임베딩 색인이 없으면 Retriever.search가 BM25로 돌아간다.
+TUTOR_ENG_MODE = os.environ.get("TUTOR_ENG_MODE", "hybrid")
+ENG_RATIO_MIN, ENG_MIN_LETTERS, ENG_TRANSLATE_TIMEOUT_S = 0.9, 8, 6.0
+_TRANSLATE_PROMPT = ("학습자가 영어로 쓴 질문을 한국어로 번역한다. 뜻을 바꾸거나 덧붙이지 않는다. 코드·변수명·파일 이름은 그대로 둔다. "
+                     "이름·상품명 같은 고유명사는 한국어로 자연스럽게 옮긴다. JSON 객체 하나로만 답한다: {\"ko\": \"번역문\"}")
+
+
+def _is_english(text: str) -> bool:
+    if "```" in text:
+        return False
+    letters = re.findall(r"[A-Za-z가-힣]", text)
+    return len(letters) >= ENG_MIN_LETTERS and sum(c.isascii() for c in letters) / len(letters) >= ENG_RATIO_MIN
+
+
+async def _translate(state: AppState, text: str, deadline: float) -> str:
+    if remaining(deadline) < 15:
+        return ""
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
+    obj = await state.llm.chat_json([{"role": "system", "content": _TRANSLATE_PROMPT}, {"role": "user", "content": text}],
+                                    min(deadline, t0 + ENG_TRANSLATE_TIMEOUT_S), max_tokens=800, priority=True)
+    ko = obj.get("ko") if isinstance(obj, dict) else None
+    ko = ko.strip()[:500] if isinstance(ko, str) else ""
+    log.info("tutor_eng_translate ok=%d ms=%d", bool(ko), (loop.time() - t0) * 1000)  # 성공 여부·시간만(본문 없음)
+    return ko
+
 
 async def _route(deadline: float, base: str, cls_task: "asyncio.Future") -> str:
     """판정(classify_input)과 답변 쪽 범주를 합친다. 공격·정서 위기는 어느 쪽이든 따르고(합집합),
@@ -428,11 +462,25 @@ async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline
 
     mode = state.settings.retrieval_mode
     qvec = None
+    cls_task = None
+    rmsgs = messages  # 검색 질의용 대화(답변 프롬프트에는 원문 그대로)
+    if (TUTOR_ENG_TRANSLATE or TUTOR_ENG_MODE != "bm25") and _is_english(messages[-1]["content"]):
+        ko = ""
+        if TUTOR_ENG_TRANSLATE:
+            if TUTOR_VOTE or TUTOR_ROUTE:  # 번역을 기다리는 동안 입력 판정 호출을 먼저 시작
+                cls_task = asyncio.ensure_future(classify_input(state, messages, deadline))
+            ko = await _translate(state, messages[-1]["content"], deadline)
+            if ko:
+                rmsgs = messages[:-1] + [{"role": "user", "content": messages[-1]["content"] + "\n" + ko}]
+        if ko or not TUTOR_ENG_TRANSLATE:
+            mode = TUTOR_ENG_MODE  # 번역에 실패하면 v18과 같은 검색(원문 BM25). 원문 영어 임베딩만으로는 더 나빴다(v19d)
     if mode != "bm25" and state.retriever.dense_ready:
-        qvec = await state.llm.embed_query(build_dense_query(messages), deadline)
-    ranked = state.retriever.search(build_query(messages), qvec, k=TOP_K, mode=mode)
+        qvec = await state.llm.embed_query(build_dense_query(rmsgs), deadline)
+    ranked = state.retriever.search(build_query(rmsgs), qvec, k=TOP_K, mode=mode)
     candidates = [sid for sid, _ in ranked]
     if remaining(deadline) < 3:
+        if cls_task:
+            cls_task.cancel()
         return rule_only_tutor(state, messages, candidates)
 
     examples = state.examples.search(messages, state.settings.fewshot_k, dedupe=160)
@@ -445,8 +493,9 @@ async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline
                        + format_tutor_examples(examples)})
     prompt.extend(messages)
 
-    cls_task = (asyncio.ensure_future(classify_input(state, messages, deadline))
-                if (TUTOR_VOTE or TUTOR_ROUTE) else None)
+    if cls_task is None:
+        cls_task = (asyncio.ensure_future(classify_input(state, messages, deadline))
+                    if (TUTOR_VOTE or TUTOR_ROUTE) else None)
     obj = await state.llm.chat_json(prompt, deadline)
     if obj is None:
         if cls_task:
