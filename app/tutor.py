@@ -375,11 +375,16 @@ _ROUTE_BENIGN = ("normal", "pii_disclosure", "answer_seeking", "out_of_material"
 # 오탐 3건(정상 질문을 정답만 요구로 2, 자료 밖 질문을 off_topic으로 1). 같은 LLM 출력 짝 비교: action 180 → 183/200,
 # 고침 3·망침 0(튜터 약 +0.4, 추정). 가드 쪽 판정이 실패(None)하면 기존 규칙(합집합)을 쓴다. 0이면 v16.1과 같다.
 TUTOR_ROUTE_GUARD = os.environ.get("TUTOR_ROUTE_GUARD", "1") == "1"
-# TUTOR_ROUTE_GUARDVOTE=1 (B안, 기본 꺼짐): 라우팅의 가드 쪽 판정을 /guard와 같은 입력 판정(GUARD_VOTES표 다수결,
+# TUTOR_ROUTE_GUARDVOTE=1 (B안, v16.4부터 기본 켬): 라우팅의 가드 쪽 판정을 /guard와 같은 입력 판정(GUARD_VOTES표 다수결,
 # 범주 재탐색 포함)으로 받는다. 끄면 기존 classify_input 1회. 튜터 요청당 LLM 호출이 GUARD_VOTES-1회 늘어난다(병렬).
-# 11-19 측정(같은 3표의 표별 1표와 짝 비교): 튜터 +0.3~0.5(추정)로 실행 간 차이(0.34)와 구분되지 않고, 호출 증가로
-# 동시 64 지연 위험이 있어(v16.1 실제 채점 튜터 p95 21.2초) 기본은 끈다. 켜려면 동시 64 부하 테스트를 먼저 한다.
-TUTOR_ROUTE_GUARDVOTE = os.environ.get("TUTOR_ROUTE_GUARDVOTE", "0") == "1"
+# 11-19 측정(같은 3표의 표별 1표와 짝 비교): 튜터 +0.3~0.5(추정)로 실행 간 차이(0.34)와 구분되지 않음.
+# 11-20 측정(공개 세트 그룹 분할 교차 검증, 판정 모델 gpt-5-nano):
+#   - 가드 쪽 판정의 공격 막음: 1표 38/44 → 3표 39/44(3표 2회 모두), 정상 잘못 막음 2/156 → 1~2/156.
+#     1표가 놓치고 3표가 2회 모두 막은 것은 유해 요청 3건(정보 받아내기·친구 통장 내역·다른 학생 이름).
+#   - 튜터 점수(1회씩): 끔 87.75 → 켬 88.54(실행 간 차이 범위 안).
+#   - 부하(동시 64, 튜터·가드 각 300, 600건): 97.3초, 오류·시간 초과·대체 답변 0, 튜터 p95 13.9초·최대 17.2초,
+#     가드 p95 11.9초. 같은 시각 각 150건 짝 비교: 튜터 p50 8.2 → 9.9초, p95 16.2 → 13.5초(API 지연 변동이 더 큼).
+TUTOR_ROUTE_GUARDVOTE = os.environ.get("TUTOR_ROUTE_GUARDVOTE", "1") == "1"
 
 
 async def _guard_category(state: AppState, messages: List[Dict[str, str]], deadline: float) -> Optional[str]:
