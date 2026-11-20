@@ -9,6 +9,9 @@ from typing import Optional
 
 # 규칙 보정(rule_adjust) 스위치. 기본 켜짐. 0이면 LLM 범주를 그대로 쓴다(규칙 효과 측정용, 개발 전용).
 RULES_ENABLED = os.environ.get("RULES", "1") != "0"
+# v27 규칙(DECIDE=code일 때만 켬, DECIDE=llm이면 v26 규칙 그대로): 사기 방법·사기 문자 만들기, 타인 주소 찾기,
+# 집단 비하, 숙제 답안 전체 요구, 영어 '정답만'. 입력 판정 호출을 빼면서 그 호출이 잡던 문항을 규칙으로 옮겼다.
+RULES_V27 = os.environ.get("DECIDE", "code") == "code"
 
 from .schemas import BLOCK_CATEGORIES, CATEGORIES
 from .textnorm import normalize
@@ -86,6 +89,20 @@ _OTHER_PII = re.compile(
     r"(?:친구|다른\s*학생|다른\s*사람|남의|그\s*애|걔)[^\n]{0,40}"
     r"(?:이름|학교|주소|연락처|전화\s*번호|번호|통장|내역|사는\s*곳)[^\n]{0,30}"
     r"(?:알아내|알아봐|찾아내|캐|퍼뜨|뿌려|뿌릴|공개)")
+# v27: 사기·사칭으로 정보를 '받아내는 방법'을 묻는 요청(배우려는 '구별법'과 다르다). 공개 세트 1/1 harmful.
+_SCAM_METHOD = re.compile(r"(?:스미싱|사기|사칭|피싱|보이스\s*피싱)[^\n]{0,40}?(?:받아내|알아내|빼내|가로채|훔치|속여서)[^\n]{0,15}?(?:방법|수법)")
+# v27: 다른 사람의 집 주소·사는 곳을 찾아내려는 요청. 공개 세트 4/4 harmful(기존 규칙이 놓친 1개 포함).
+_OTHER_ADDR = re.compile(r"(?:친구|다른\s*학생|다른\s*사람|남의|그\s*애|걔)[^\n]{0,20}?(?:집\s*)?(?:주소|사는\s*곳)[^\n]{0,25}?(?:찾아|알아|검색)")
+# v27: 특정 집단('그 동네 사람들' 등)을 깎아내리거나 내쫓자는 말. '~라는 문장'으로 인용해 묻는 것은 제외.
+# 공개 세트 8/8 harmful(인용해 묻는 normal 1개는 제외됨). 입력 판정 호출을 빼면 이 문항들이 answer로 새었다.
+_GROUP_INSULT = re.compile(r"(?:그|저|이)\s*(?:동네|지역|나라|마을)\s*(?:사람|애|학생)들?[^\n]{0,30}?"
+                           r"(?:빼야|쫓아내|내쫓|없애야|사기꾼|수준이?\s*낮|자격(?:도)?\s*없|싫어|못\s*믿|더러)")
+# v27: 사기·스미싱 문자를 '만드는 방법'(공개 세트 1/1 harmful).
+_SCAM_MAKE = re.compile(r"(?:스미싱|피싱|사기|사칭)[^\n]{0,30}?(?:문자|문구|메시지|글)[^\n]{0,30}?(?:만드는|만들|쓰는|작성하는|꾸미는)\s*(?:방법|법)")
+# v27: 수행평가·숙제의 '답안 전체'를 달라는 요청(공개 세트 2/2 academic).
+_ACADEMIC_FULL = re.compile(r"(?:수행\s*평가|숙제|과제|시험)[\s\S]{0,60}?(?:답안\s*전체|전체\s*답안|답안을?\s*(?:다|전부|통째로)|완성본)")  # 줄바꿈을 넘어도 60자 안
+# v27: 영어 '정답만' 표현(공개 세트 1/1 answer_seeking).
+_ANSWER_ONLY_EN = re.compile(r"\b(?:only|just)\s+(?:give\s+me\s+)?(?:the\s+)?(?:final\s+)?answer\b|\bgive\s+me\s+only\s+the\s+answer\b|\banswer\s+only\b")
 _DISTRESS = re.compile(r"몇\s*주|몇\s*달|계속\s*(?:힘|우울|무기력)|혼자\s*버티|아무것도\s*하기\s*싫|지쳐|지쳤|우울|죽고\s*싶|사라지고\s*싶|잠을\s*못")
 # 탈옥·주입: 튜터에게 '직접 시키는' 표현과, 같은 표현을 '분석 대상'으로만 쓰는 표현을 구분한다.
 # 공개 세트 400건(튜터+가드) 라벨 분석: jailbreak 판정 30/30 정답(재현율 30/31), 분석용 판정 2/2 normal.
@@ -163,6 +180,9 @@ def rule_adjust(category: str, last_text: str) -> str:
         category = "normal"
     if category in ("normal", "out_of_material", "answer_seeking", "pii_disclosure", "off_topic") and _SCAM_WRITE.search(t):
         return "harmful_content"
+    if RULES_V27 and category in ("normal", "out_of_material", "answer_seeking", "pii_disclosure", "off_topic") and (
+            _SCAM_METHOD.search(t) or _SCAM_MAKE.search(t)):
+        return "harmful_content"
     if category == "academic_dishonesty" and _OWN_WORK.search(t):
         category = "normal"
     # 게임 공략·이기는 법은 수업 소재를 섞어도 off_topic(공개 세트: normal 오탐 0건).
@@ -172,18 +192,21 @@ def rule_adjust(category: str, last_text: str) -> str:
         return "off_topic"
     if category == "normal" and _INSULT.search(t) and not _HARM_QUOTED.search(t):
         return "harmful_content"
+    if RULES_V27 and category in ("normal", "out_of_material", "pii_disclosure") and _GROUP_INSULT.search(t) and not _HARM_QUOTED.search(t):
+        return "harmful_content"
     if category == "out_of_material" and _OFF_TOPIC.search(t):
         return "off_topic"
-    if category in ("normal", "answer_seeking", "out_of_material", "pii_disclosure") and _OTHER_PII.search(t):
+    if category in ("normal", "answer_seeking", "out_of_material", "pii_disclosure") and (
+            _OTHER_PII.search(t) or (RULES_V27 and _OTHER_ADDR.search(t))):
         return "harmful_content"
-    if category in ("normal", "answer_seeking") and _ACADEMIC.search(t) and not _OWN_WORK.search(t):
+    if category in ("normal", "answer_seeking") and (_ACADEMIC.search(t) or (RULES_V27 and _ACADEMIC_FULL.search(t))) and not _OWN_WORK.search(t):
         return "academic_dishonesty"
     if category == "emotional_distress" and not _DISTRESS.search(t):
         return "normal"
     if category == "normal":
         if _DISTRESS.search(t):
             return "emotional_distress"
-        if _ANSWER_ONLY.search(t):
+        if _ANSWER_ONLY.search(t) or (RULES_V27 and _ANSWER_ONLY_EN.search(t)):
             return "answer_seeking"
         if _PII_SELF.search(t):
             return "pii_disclosure"

@@ -17,6 +17,7 @@ from .examples import format_guard_input_examples, format_guard_output_examples
 from .llm import remaining
 from .kbprep import _on as _kbprep_on
 from .kbprep import is_english
+from .decide import rule_decision, stronger
 
 log = logging.getLogger("halt")
 from .policy import (CATEGORY_AFTER_DECISION, CATEGORY_GUIDE, DECISION_GUIDE, PROBLEM_TYPES, CLASSIFY_FEATURES, FEATURE_GUIDE, FEATURES_JSON, coerce_category, decision_for,
@@ -242,6 +243,10 @@ async def handle_guard(state: AppState, messages: List[Dict[str, str]],
     rule_low_signal = is_low_signal(last)
     if rule_low_signal and not has_candidate:
         return {"input": {"decision": "allow", "category": "low_signal_input"}}
+    # v27 0단계: 규칙이 차단 범주로 정하면(후보 답변이 있어도) 또는 허용 범주인데 후보 답변이 없으면 LLM 없이 판정한다.
+    rcat = rule_decision(last)
+    if rcat and (rcat in BLOCK_CATEGORIES or not has_candidate):
+        return rule_only_guard(messages, candidate)
 
     prompt = _build_prompt(state, messages, candidate, material_check=CAT_RECALL, focus_tail=GUARD_FOCUS_TAIL)
     if remaining(deadline) < 3:
@@ -255,6 +260,12 @@ async def handle_guard(state: AppState, messages: List[Dict[str, str]],
         return rule_only_guard(messages, candidate)
 
     result = _decide(state, messages, candidate, objs)
+    if rcat:
+        # v27 2단계: 규칙이 정한 허용 범주(자기 정보·정답만 요구·정서 위기 등)와 LLM 범주 중 우선순위가 높은 쪽
+        inp = result.get("input", {})
+        cat = stronger(rcat, inp.get("category"))
+        if cat != inp.get("category"):
+            result["input"] = {"decision": decision_for(cat), "category": cat}
     if GUARD_DEBUG:
         result["_debug"] = {"votes": objs}
     return result

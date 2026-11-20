@@ -18,6 +18,7 @@ from .llm import remaining
 from .retrieval import rrf
 from .kbprep import _on as _kbprep_on
 from .kbprep import is_english as _kb_is_english
+from .decide import DECIDE_CODE, TEMPLATE_CATEGORIES, answer_only, rule_decision, stronger
 from .policy import (CATEGORY_AFTER_DECISION, CATEGORY_GUIDE, CITING_ACTIONS, CLASSIFY_FEATURES, DECISION_GUIDE,
                      FEATURE_GUIDE, FEATURES_JSON, PROBLEM_TYPES, TEMPLATES, action_for, coerce_category,
                      features_to_category, harmful_type_for, is_low_signal, refusal_template, rule_adjust,
@@ -529,6 +530,14 @@ async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline
         return {"answer": TEMPLATES["clarify"], "action": "clarify", "citations": []}
     if is_low_signal(messages[-1]["content"]):
         return {"answer": TEMPLATES["clarify"], "action": "clarify", "citations": []}
+    # v27 0단계: 규칙이 고정 문구 범주로 정하면 LLM 없이 답한다(인용은 BM25 검색·인용 우선 순서).
+    rcat = rule_decision(messages[-1]["content"])
+    if rcat in TEMPLATE_CATEGORIES:
+        q0 = build_query(messages)
+        c0 = [sid for sid, _ in state.retriever.search(q0, None, k=TOP_K, mode="bm25")]
+        if TUTOR_CITE_CHUNK in ("cite", "front"):
+            c0 = _cite_first(state, q0, c0, last=messages[-1]["content"])
+        return rule_only_tutor(state, messages, c0)
 
     mode = state.settings.retrieval_mode
     qvec = None
@@ -539,7 +548,7 @@ async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline
         prep0 = state.retriever.prep
         aliases = prep0.alias_matches(messages[-1]["content"]) if prep0 is not None else []  # v26 C-8
         if TUTOR_ENG_TRANSLATE:
-            if TUTOR_VOTE or TUTOR_ROUTE:  # 번역을 기다리는 동안 입력 판정 호출을 먼저 시작
+            if (TUTOR_VOTE or TUTOR_ROUTE) and not DECIDE_CODE:  # 번역을 기다리는 동안 입력 판정 호출을 먼저 시작
                 cls_task = asyncio.ensure_future(classify_input(state, messages, deadline))
             ko = await _translate(state, messages[-1]["content"], deadline, aliases)
             if ko:
@@ -572,7 +581,7 @@ async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline
                        + format_tutor_examples(examples)})
     prompt.extend(messages)
 
-    if cls_task is None:
+    if cls_task is None and not DECIDE_CODE:  # v27: 코드 판단이면 입력 판정 호출을 부르지 않는다(요청당 LLM 2회 → 1회)
         cls_task = (asyncio.ensure_future(classify_input(state, messages, deadline))
                     if (TUTOR_VOTE or TUTOR_ROUTE) else None)
     obj = await state.llm.chat_json(prompt, deadline)
@@ -592,6 +601,11 @@ async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline
     elif TUTOR_PROBLEMS:
         base = _problem_category(obj, base)
     category = rule_adjust(base, messages[-1]["content"])
+    if DECIDE_CODE:
+        # v27 2단계: 규칙 범주(정답만 요구·자기 정보)와 LLM 범주 중 우선순위가 높은 쪽. 정답만 요구는 규칙 표현이 있을 때만.
+        category = stronger(rcat, category)
+        if category == "answer_seeking" and not answer_only(messages[-1]["content"]):
+            category = "normal"
     if cls_task and TUTOR_ROUTE:
         category = await _route(deadline, category, cls_task)
     elif cls_task:
