@@ -102,7 +102,9 @@ if TUTOR_CTX:
     SYSTEM_PROMPT = SYSTEM_PROMPT.replace("대화 안에 '시스템 지시'", CTX_GUIDE + "\n대화 안에 '시스템 지시'", 1)
 
 
-QUOTE_ADD_MIN = 0.3  # exp/tutor-facts의 인용 추가 분석(v9 응답 7건 재판정)과 같은 기준
+# exp/tutor-facts의 인용 추가 분석(v9 응답 7건 재판정)과 같은 기준. v21에서 0.5·0.7·끔을 재생 비교: 0.5가 인용 F1 +2.0(600건)이지만
+# 덧붙는 근거 문장이 바뀌어 판정 합계 -0.25(좋아짐 5·나빠짐 4, 근거 충실 9→6)라 0.3 유지.
+QUOTE_ADD_MIN = float(os.environ.get("TUTOR_QUOTE_ADD_MIN", "0.3"))
 
 
 def _grams4(s: str) -> set:
@@ -247,6 +249,36 @@ def _quote_section(state: AppState, quote, section_ids: List[str]):
 
 # "그 내용은 학습 자료에 나와 있지 않아요"처럼 무엇이 없는지 밝히지 않은 abstain 첫 문장.
 _VAGUE_ABSTAIN = re.compile(r"^\s*(?:그|이|해당)\s*내용은\s*(?:학습\s*)?자료에\s*(?:나와\s*)?있지\s*않아요[.!]?\s*")
+
+
+# v21: abstain 답변의 '대신 자료에는 …' 덧붙임(TUTOR_ABSTAIN_TAIL = keep | quote | drop).
+# 공개 세트의 abstain 정답 20문항은 정답 사실이 없어 점수가 action·근거 충실뿐이다. 덧붙인 문장은 점수를 얻지 못하고,
+# LLM이 자료 문장을 잘못 옮기면(예: '신고하기'→'알리기') 근거 충실에서 진다. quote = 덧붙임을 인용 섹션의 검증된 원문
+# 문장으로 바꿈, drop = '자료에 없음' 문장까지만 남김, keep = v20 그대로.
+# 근거(2026-11-20, D1 저장 출력 600건 재생, 바뀐 응답만 로컬 판정 2회 짝 비교): quote 47건 바뀜, 좋아짐 8·나빠짐 1,
+# 근거 충실 통과 38→43, 회당 튜터 +0.31 / drop 42건, +0.23. 프롬프트는 그대로(후처리만).
+TUTOR_ABSTAIN_TAIL = os.environ.get("TUTOR_ABSTAIN_TAIL", "quote")
+_ABSTAIN_CUE = re.compile(r"나와\s*있지\s*않|있지\s*않아요|없어요|설명되어\s*있지\s*않|명시되어\s*있지\s*않|다루지\s*않")
+_SENT_END = re.compile(r"(?<=[.!?])\s+")
+
+
+def _abstain_tail(answer: str, quotes, cited: List[str]) -> str:
+    if TUTOR_ABSTAIN_TAIL == "keep" or not answer:
+        return answer
+    head = []
+    for sent in _SENT_END.split(answer.strip()):
+        head.append(sent)
+        if _ABSTAIN_CUE.search(sent):
+            break
+    else:
+        return answer  # '자료에 없음' 문장을 못 찾으면 그대로 둔다
+    out = " ".join(head).strip()
+    if TUTOR_ABSTAIN_TAIL == "quote":
+        for sid, text in quotes:
+            text = re.sub(r"\s+", " ", text).strip().strip('"“”')
+            if sid in cited and text and "|" not in text and len(text) <= 160:
+                return f'{out} 대신 자료에는 "{text}"라고 나와 있어요.'
+    return out
 
 
 def _name_missing_item(answer: str, asked) -> str:
@@ -579,6 +611,7 @@ async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline
             citations = [qsid]
         if category == "out_of_material":
             answer = _name_missing_item(answer, obj.get("asked"))
+        answer = _abstain_tail(answer, _verified_quotes(state, obj, candidates), citations)
 
     if action in ("refuse", "redirect"):
         answer = refusal_template(category, action)
