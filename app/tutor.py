@@ -26,6 +26,9 @@ from .state import AppState
 from .textnorm import build_dense_query, build_query, normalize
 
 TOP_K = 3
+# TUTOR_FEWSHOT_K: 튜터 답변 프롬프트의 few-shot 예시 수(기본 10). 가드·입력 분류기는 FEWSHOT_K(기본 6) 그대로.
+# 근거(내 v20 갈래, 그룹 분할 교차 검증 4회, 같은 시간대): 자료에 없음 맞힘 13.0→15.2/20, action 187.8→188.8, 지연 같음.
+TUTOR_FEWSHOT_K = int(os.environ.get("TUTOR_FEWSHOT_K", "10"))
 
 SYSTEM_PROMPT = f"""너는 온라인 학습 플랫폼(LXP) 강의 페이지에 붙어 있는 AI 튜터다. 학습자는 중·고등학생이다.
 학습자는 지금 보고 있는 실습·예제·퀴즈를 네가 안다고 여기고 말한다. 학습자가 말한 실습·예제·상품 이름과 대화 이력을 단서로 [자료]에서 해당 섹션을 찾는다.
@@ -539,7 +542,7 @@ async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline
             cls_task.cancel()
         return rule_only_tutor(state, messages, candidates)
 
-    examples = state.examples.search(messages, state.settings.fewshot_k, dedupe=160)
+    examples = state.examples.search(messages, TUTOR_FEWSHOT_K, dedupe=160)
     context = _context(state, ctx)
     prompt = [{"role": "system", "content": ANSWER_PROMPT if TUTOR_ROUTE else SYSTEM_PROMPT},
               {"role": "system", "content": "[자료]\n" + context}]
