@@ -324,6 +324,19 @@ def _decide(state: AppState, messages: List[Dict[str, str]], candidate: Optional
                     spans = _merge_value_spans(spans, wv)
                 except Exception as e:
                     log.warning("guard_e11_failed type=%s", type(e).__name__)
+        prep = state.retriever.prep
+        if safe and prep is not None and _kbprep_on("FACT"):
+            # v31 2-나: 사실 표와 어긋나는 값(자료에 있는 값이 다른 대상·속성에 잘못 붙음). 근거 없음이면 구간을 그 값 구절로 좁히고,
+            # FACTFLIP이면 근거 있음 판정도 근거 없음으로 바꾼다. 실패하면 원래 판정을 쓴다.
+            try:
+                convo = " ".join(m["content"] for m in messages)
+                fc = prep.fact_conflicts(candidate, _retrieve(state, messages, candidate), convo)
+                if fc and not grounded:
+                    spans = _merge_value_spans(spans, fc)
+                elif fc and grounded and _kbprep_on("FACTFLIP"):
+                    grounded, spans = False, fc
+            except Exception as e:
+                log.warning("guard_fact_failed type=%s", type(e).__name__)
         result["output"] = {"grounded": grounded, "unsupported": spans, "safe": safe, "category": category}
     return result
 

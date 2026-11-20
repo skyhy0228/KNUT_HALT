@@ -634,6 +634,11 @@ async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline
             and obj.get("in_material") is False and isinstance(obj.get("asked"), str)
             and prep.coverage(obj["asked"], candidates) < KBPREP_D10_MIN):
         category, answer = "out_of_material", TEMPLATES["abstain"]
+    # v31 2-가: 묻는 항목이 [자료] 섹션들의 '다루지 않는 것' 목록에 '다루는 것'보다 잘 맞으면 자료 밖으로 본다(대상 이름이 있어야 함).
+    if (prep is not None and _kbprep_on("COV") and category in ("normal", "pii_disclosure")
+            and isinstance(obj.get("asked"), str) and obj["asked"].strip()
+            and prep.cover_verdict(obj["asked"], candidates, messages[-1]["content"]) == "not_covered"):
+        category, answer = "out_of_material", TEMPLATES["abstain"]
     if OOM_CHECK and category in ("normal", "pii_disclosure") and obj.get("in_material") is False:
         category, answer = "out_of_material", TEMPLATES["abstain"]
     harmful_type = harmful_type_for(messages[-1]["content"]) if category == "harmful_content" else None

@@ -39,7 +39,11 @@ KBPREP = os.environ.get("KBPREP", "1") == "1"
 #     검색 전처리(A-3·B-6·C-7·C-9)·A-2·F-13이 남은 v24도 0.84 낮았다. 가드 E-11(틀린 값 구간)만 켠다
 #     (v23·v24 가드 8회 평균 91.01, v19~v22 90.65).
 #  v26: C-8 별칭 사전을 켠다(영어 질문에서만 동작). 기본값이면 영어 질문을 빼고 튜터·가드 검색과 튜터 동작은 v22와 같다.
-_DEFAULTS = {"B4": "0", "B5": "0", "D10": "0", "A1": "0", "A2": "0", "A3": "0", "B6": "0", "C7": "0", "C9": "0", "F13": "0"}
+_DEFAULTS = {"B4": "0", "B5": "0", "D10": "0", "A1": "0", "A2": "0", "A3": "0", "B6": "0", "C7": "0", "C9": "0", "F13": "0",
+             # v31 오프라인 자료(scripts/build_kb_offline.py, 운영진 제공 LLM medium·스트리밍, 입력은 kb/만)
+             # 공개 재생: COV 고침 0·깨짐 0, FACT(구간 좁히기) 가드 +0.01·깨짐 0 → 켬.
+             # FACTFLIP(근거 있음 → 없음 뒤집기)은 계산으로 나온 맞는 값(예: 한 달 이자)을 어긋난 값으로 볼 위험이 있어 끔.
+             "COV": "1", "FACT": "1", "FACTFLIP": "0"}
 
 
 def _on(name: str) -> bool:
@@ -179,6 +183,62 @@ def _grams(s: str, n: int = 4) -> Set[str]:
     return {s[i:i + n] for i in range(len(s) - n + 1)}
 
 
+# v31 2-가 기준: 물을 거리의 글자 2-gram 중 묻는 항목에 들어 있어야 하는 비율
+COV_MIN = float(os.environ.get("KBPREP_COV_MIN", "0.6"))
+_GEN_UNITS = {"개월", "달", "주", "일", "년", "회", "번", "개", "명", "점", "분", "초", "층", "등", "위", "칸", "줄", "장", "권", "배", "단계"}
+
+
+def _flat_text(t) -> str:
+    return re.sub(r"[\s\W_]+", "", normalize(str(t)))
+
+
+def _bigrams(t) -> set:
+    f = _flat_text(t)
+    return {f[i:i + 2] for i in range(len(f) - 1)}
+
+
+def _clause_values(text: str) -> List[Tuple[int, int, str, str]]:
+    """글 속 값의 (시작, 끝, 종류, 정규화 값). 종류: won·pct·age·h(C-7 정규화), u:단위(개월·회 등)."""
+    vals, taken = [], []
+    for rx, cls in ((_MONEY, "won"), (_PCT, "pct"), (_AGE_RANGE, "age"), (_AGE, "age"), (_HOUR, "h")):
+        for m in rx.finditer(text):
+            if any(s0 < m.end() and m.start() < e0 for s0, e0 in taken):
+                continue
+            for tok in num_tokens(m.group(0)):
+                if tok.startswith(cls):
+                    vals.append((m.start(), m.end(), cls, tok[len(cls):]))
+            taken.append((m.start(), m.end()))
+    for m in _VALUE.finditer(text):
+        if any(s0 < m.end() and m.start() < e0 for s0, e0 in taken):
+            continue
+        unit = m.group(2) or ""
+        unit = _PARTICLE_TAIL.sub("", unit) if len(unit) > 1 else unit
+        if unit in _GEN_UNITS:
+            vals.append((m.start(), m.end(), "u:" + unit, _num(m.group(1).replace(",", ""))))
+    return vals
+
+
+def _class_values(text: str) -> Dict[str, set]:
+    out: Dict[str, set] = {}
+    for _, _, cls, val in _clause_values(str(text)):
+        out.setdefault(cls, set()).add(val)
+    return out
+
+
+def _value_phrase(clause: str, start: int, end: int) -> str:
+    """값 구절: 앞 수식어 두 낱말까지 + 값(뒤 단위·조사는 떼어 냄). E-11 구간과 같은 꼴."""
+    left = clause[:start].rstrip().split(" ")
+    lead = []
+    for w in reversed(left[-2:]):
+        if not w or re.search(r"(?:[.!?]|므로|면|고|서|며|해)$", w):
+            break
+        lead.insert(0, w)
+    tail = re.match(r"[%가-힣]*", clause[end:])
+    word = clause[start:end] + (tail.group(0) if tail else "")
+    word = _PARTICLE_TAIL.sub("", word.strip()) or word.strip()
+    return " ".join(lead + [word]).strip()
+
+
 class KBPrep:
     def __init__(self, sections: Dict[str, Section], kb_dir=None):
         from .retrieval import BM25  # 순환 import 방지
@@ -304,6 +364,86 @@ class KBPrep:
             self.alias_index = []
         self.alias_index.sort(key=lambda x: -len(x[0]))
         log.info("kb_aliases_loaded names=%d phrases=%d", len({k for _, _, k in self.alias_index}), len(self.alias_index))
+        self._load_offline()
+
+    # ---- v31 오프라인 자료: 섹션별 '다루는 것/다루지 않는 것'(COV), 사실 표(FACT) ----
+    def _load_offline(self) -> None:
+        from pathlib import Path
+        base = Path(__file__).resolve().parents[1] / "data"
+        self.coverage_items: Dict[str, Dict[str, list]] = {}
+        self.fact_rows: Dict[str, list] = {}
+        try:
+            path = Path(os.environ.get("KB_COVERAGE", base / "kb_coverage.json"))
+            cov = json.loads(path.read_text(encoding="utf-8")).get("coverage", {}) if path.exists() else {}
+            for sid, v in cov.items():
+                self.coverage_items[sid] = {
+                    k: [(_flat_text(it["s"]), _bigrams(it["q"])) for it in v.get(k, []) if isinstance(it, dict) and it.get("s") and it.get("q")]
+                    for k in ("covers", "not_covered")}
+            path = Path(os.environ.get("KB_FACTS", base / "kb_facts.json"))
+            facts = json.loads(path.read_text(encoding="utf-8")).get("facts", {}) if path.exists() else {}
+            for sid, rows in facts.items():
+                out = []
+                for f in rows:
+                    vals = _class_values(f.get("v", ""))
+                    if vals and f.get("s") and f.get("p"):
+                        out.append((_flat_text(f["s"]), _bigrams(f["p"]), vals))
+                self.fact_rows[sid] = out
+        except Exception as e:  # 자료가 깨져도 서버 시작은 막지 않는다(이 기능만 꺼짐)
+            log.warning("kb_offline_load_failed type=%s", type(e).__name__)
+            self.coverage_items, self.fact_rows = {}, {}
+        log.info("kb_offline_loaded coverage_sections=%d fact_rows=%d", len(self.coverage_items),
+                 sum(len(v) for v in self.fact_rows.values()))
+
+    def cover_verdict(self, asked: str, sids: List[str], question: str = "") -> str:
+        """묻는 항목이 [자료] 섹션들의 '다루는 것'과 '다루지 않는 것' 중 어디에 맞는가: covered | not_covered | unknown.
+        항목의 대상 이름이 묻는 항목(또는 질문)에 글자 그대로 있어야 하고, 물을 거리의 글자 2-gram이 COV_MIN 이상 들어 있어야 맞는다고 본다."""
+        if not (_on("COV") and self.coverage_items):
+            return "unknown"
+        a_flat = _flat_text(asked)
+        ctx_flat = a_flat + _flat_text(question)
+        a_bi = _bigrams(asked)
+        best = {"covers": 0.0, "not_covered": 0.0}
+        for sid in sids:
+            for kind in ("covers", "not_covered"):
+                for s_flat, q_bi in self.coverage_items.get(sid, {}).get(kind, []):
+                    if not s_flat or s_flat not in ctx_flat or not q_bi:
+                        continue
+                    best[kind] = max(best[kind], len(q_bi & a_bi) / len(q_bi))
+        if best["not_covered"] >= COV_MIN and best["not_covered"] > best["covers"]:
+            return "not_covered"
+        return "covered" if best["covers"] >= COV_MIN else "unknown"
+
+    def fact_conflicts(self, candidate: str, sids: List[str], question: str = "") -> List[str]:
+        """후보 답변에서 사실 표와 어긋나는 값 구절. 같은 대상(절에 이름이 없으면 질문의 대상)의 같은 속성(글자 2-gram이 하나 이상 겹침)을
+        말하면서, 같은 종류의 값(금액·비율·나이·시각·개월 등)이 사실 표의 어느 값과도 맞지 않을 때만. 질문·대화에 나온 숫자는 뺀다.
+        E-11(자료 어디에도 없는 값)과 달리, 자료에 있는 값이 다른 대상·속성에 잘못 붙은 경우를 잡는다."""
+        if not (_on("FACT") and self.fact_rows):
+            return []
+        rows = [r for sid in sids for r in self.fact_rows.get(sid, [])]
+        if not rows:
+            return []
+        q_flat = _flat_text(question)
+        q_nums = set(re.findall(r"\d+(?:\.\d+)?", _SID_REF.sub(" ", str(question)).replace(",", "")))
+        q_vals = _class_values(question)  # 질문·대화에 나온 값은 같은 정규화로 비교해 뺀다('6만 원' = won60000)
+        out = []
+        cand = _SID_REF.sub(" ", candidate)
+        for clause in re.split(r"(?<=[.!?])\s+|,\s+|\s+(?:그리고|따라서|그래서)\s+", cand):
+            c_flat, c_bi = _flat_text(clause), _bigrams(clause)
+            named = [r for r in rows if r[0] and r[0] in c_flat]
+            rel = named or [r for r in rows if r[0] and r[0] in q_flat]
+            rel = [r for r in rel if r[1] & c_bi]
+            if not rel:
+                continue
+            for start, end, cls, val in _clause_values(clause):
+                same = [r for r in rel if cls in r[2]]
+                if not same:
+                    continue
+                allowed = set().union(*[r[2][cls] for r in same])
+                raw = re.sub(r"[^\d.]", "", val.replace("p", "."))
+                if val in allowed or raw in q_nums or val in q_vals.get(cls, set()):
+                    continue
+                out.append(_value_phrase(clause, start, end))
+        return list(dict.fromkeys(x for x in out if x))
 
     def alias_matches(self, text: str) -> List[Tuple[str, str]]:
         """영어 글에서 찾은 (영어 표현, 한국어 이름). 긴 표현부터 찾고, 이미 쓴 낱말은 짧은 표현이 다시 쓰지 않는다.
