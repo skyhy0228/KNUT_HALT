@@ -17,6 +17,7 @@ from .examples import format_tutor_examples
 from .llm import remaining
 from .retrieval import rrf
 from .kbprep import _on as _kbprep_on
+from .kbprep import is_english as _kb_is_english
 from .policy import (CATEGORY_AFTER_DECISION, CATEGORY_GUIDE, CITING_ACTIONS, CLASSIFY_FEATURES, DECISION_GUIDE,
                      FEATURE_GUIDE, FEATURES_JSON, PROBLEM_TYPES, TEMPLATES, action_for, coerce_category,
                      features_to_category, harmful_type_for, is_low_signal, refusal_template, rule_adjust,
@@ -75,7 +76,7 @@ if TUTOR_PROBLEMS:
         'non_course_output|answer_only", ...], "asked":', 1)
 
 
-# ---- 실험: 메모 → 근거 문장 → 답변 (TUTOR_QUOTES), 맥락 표시·맥락 신뢰(TUTOR_CTX). 기본 꺼짐 ----
+# ---- 메모 → 근거 문장 → 답변 (TUTOR_QUOTES), 맥락 표시·맥락 신뢰(TUTOR_CTX). v11부터 기본 켬 ----
 # 근거: Chain-of-Note(섹션별 관련성 메모), Attribute First then Generate·FRONT(근거 문장을 먼저 고르고 그것으로 생성),
 # The Power of Noise(관련 있어 보이는 방해 문서가 가장 해롭다), Context-faithful Prompting(맥락을 화자의 설명으로 제시).
 # 우리 측정: 같은 이름의 다른 섹션 값을 쓰는 경우, 근거 충실은 '인용한 섹션'에만 비추어 판정되는데 답 출처와 인용이
@@ -436,13 +437,14 @@ TUTOR_SEEK_FROM = os.environ.get("TUTOR_SEEK_FROM", "union")
 # 근거(2026-11-20, 공개 세트 영어 튜터 6문항 × 5회, 로컬 판정 2회): 문항 점수 합이 v18 대비 +0.38~+0.45.
 #   번역 + BM25만은 -0.03(번역문이 매번 달라 같은 문항의 정답 섹션이 2~15위로 흔들림), 번역 없이 원문 임베딩 하이브리드는 -0.30.
 #   그래서 번역에 실패하면 v18과 같은 검색(원문 BM25)으로 돌아간다. 코드가 든 영어 질문은 코드 낱말로 이미 잘 찾아 제외한다.
-# 번역 지시에는 KB 고유명사 힌트를 넣지 않는다(일반 번역). 7.5초 안에 못 받거나 남은 시간이 15초 미만이면 번역하지 않는다.
+# 번역 지시는 일반 번역이고, v26부터 질문에서 C-8 별칭 사전의 영어 이름이 걸리면 그 이름만 '[자료 속 이름]' 힌트로 준다.
+# 7.5초 안에 못 받거나 남은 시간이 15초 미만이면 번역하지 않는다.
 # (v20: 제한 6→8초. v19 실채점 3회에서 번역 42회 중 7회가 5.5초 제한에 걸렸다. 성공한 번역은 중앙 3.6~4.5초.)
 # 번역 호출은 동시 상한 대기열을 건너뛴다(채점 때는 대기열이 차서 짧은 호출도 제한 시간을 넘기기 쉽다). 영어 질문에만 1회.
 TUTOR_ENG_TRANSLATE = os.environ.get("TUTOR_ENG_TRANSLATE", "1") == "1"
 # 영어 질문의 검색 방식: bm25 | hybrid(BM25 + 임베딩 RRF) | dense. 임베딩 색인이 없으면 Retriever.search가 BM25로 돌아간다.
 TUTOR_ENG_MODE = os.environ.get("TUTOR_ENG_MODE", "hybrid")
-ENG_RATIO_MIN, ENG_MIN_LETTERS, ENG_TRANSLATE_TIMEOUT_S = 0.9, 8, 8.0
+ENG_TRANSLATE_TIMEOUT_S = 8.0  # 영어 판별 기준(로마자 90%, 8글자)은 kbprep.is_english 한 곳에서 정한다(가드와 공용)
 
 # v20: 인용 우선 섹션(TUTOR_CITE_CHUNK = 0 | cite | front). 섹션 BM25와 청크 BM25(섹션 점수 = 청크 최고점)의 순위를 RRF로 합쳐
 # 검색 상위 3 안에서 1위를 고른다. cite = 인용·근거 문장 우선순위만 바꾼다([자료] 순서 그대로).
@@ -476,18 +478,19 @@ def _cite_first(state: AppState, query: str, candidates: List[str], last: str = 
 
 
 def _is_english(text: str) -> bool:
-    if "```" in text:
-        return False
-    letters = re.findall(r"[A-Za-z가-힣]", text)
-    return len(letters) >= ENG_MIN_LETTERS and sum(c.isascii() for c in letters) / len(letters) >= ENG_RATIO_MIN
+    return _kb_is_english(text)
 
 
-async def _translate(state: AppState, text: str, deadline: float) -> str:
+async def _translate(state: AppState, text: str, deadline: float, hints=()) -> str:
     if remaining(deadline) < 15:
         return ""
     loop = asyncio.get_running_loop()
     t0 = loop.time()
-    obj = await state.llm.chat_json([{"role": "system", "content": _TRANSLATE_PROMPT}, {"role": "user", "content": text}],
+    system = [{"role": "system", "content": _TRANSLATE_PROMPT}]
+    if hints:  # v26 C-8: 질문에서 찾은 자료 속 이름은 자료의 한국어 이름 그대로 옮기게 한다
+        system.append({"role": "system", "content": "[자료 속 이름] 아래 영어 이름은 이 한국어 이름 그대로 옮긴다: "
+                       + "; ".join(f"{en} → {ko}" for en, ko in hints)})
+    obj = await state.llm.chat_json(system + [{"role": "user", "content": text}],
                                     min(deadline, t0 + ENG_TRANSLATE_TIMEOUT_S), max_tokens=800, priority=True)
     ko = obj.get("ko") if isinstance(obj, dict) else None
     ko = ko.strip()[:500] if isinstance(ko, str) else ""
@@ -533,12 +536,16 @@ async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline
     rmsgs = messages  # 검색 질의용 대화(답변 프롬프트에는 원문 그대로)
     if (TUTOR_ENG_TRANSLATE or TUTOR_ENG_MODE != "bm25") and _is_english(messages[-1]["content"]):
         ko = ""
+        prep0 = state.retriever.prep
+        aliases = prep0.alias_matches(messages[-1]["content"]) if prep0 is not None else []  # v26 C-8
         if TUTOR_ENG_TRANSLATE:
             if TUTOR_VOTE or TUTOR_ROUTE:  # 번역을 기다리는 동안 입력 판정 호출을 먼저 시작
                 cls_task = asyncio.ensure_future(classify_input(state, messages, deadline))
-            ko = await _translate(state, messages[-1]["content"], deadline)
+            ko = await _translate(state, messages[-1]["content"], deadline, aliases)
             if ko:
                 rmsgs = messages[:-1] + [{"role": "user", "content": messages[-1]["content"] + "\n" + ko}]
+        if aliases:  # 번역이 실패해도 자료 속 한국어 이름은 검색 질의에 넣는다
+            rmsgs = rmsgs[:-1] + [{"role": "user", "content": rmsgs[-1]["content"] + "\n" + " ".join(k for _, k in aliases)}]
         if ko or not TUTOR_ENG_TRANSLATE:
             mode = TUTOR_ENG_MODE  # 번역에 실패하면 v18과 같은 검색(원문 BM25). 원문 영어 임베딩만으로는 더 나빴다(v19d)
     if mode != "bm25" and state.retriever.dense_ready:

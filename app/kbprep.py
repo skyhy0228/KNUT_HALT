@@ -1,20 +1,19 @@
-"""v23 KB 전처리(KBPREP). 원본 kb/는 그대로 두고, 서버 시작 때 파생 색인을 만든다(LLM·외부 자료 없음, 결정적).
+"""KB 전처리(KBPREP, v23~). 원본 kb/는 그대로 두고, 서버 시작 때 파생 색인을 만든다(색인 생성에는 LLM을 쓰지 않는다).
+C-8 별칭 사전만 운영진 제공 LLM으로 미리 만든 KB 가공물(data/kb_aliases.json)을 읽는다.
 
-A-1 계층 자료      : 2·3위 섹션은 질문과 맞는 소제목 청크만 [자료]에 넣는다(1위 섹션은 전문). → tutor._context
-A-2 FAQ 색인       : '### Q.' 질문(섹션 제목 포함)을 따로 색인한다. → 인용 우선 섹션 순위에 더함
-A-3 표 문장화      : CSV 행을 '열 이름: 값' 문장으로 풀어 검색 색인에 넣는다(자료·인용에는 원본 표 그대로).
-B-4 이름 고정 청크 : 여러 섹션에 나오는 낱말 묶음(예: 과일 바구니)이 질문에 있으면 그 낱말이 든 청크끼리만 비교한 순위.
-B-5 같은 사실 묶음 : 답의 근거 문장과 거의 같은 문장이 다른 섹션에도 있으면, 그 사실 낱말을 뺀 나머지 질문 낱말로 섹션을 고른다.
-B-6 상투 문구      : '가상 은행' 안내 문장은 처음 나오는 섹션에만 남기고 다른 섹션의 검색 색인에서 뺀다.
-C-7 숫자 정규화    : 금액·비율·나이·시각을 한 표기로 바꾼 토큰(won25000, pct1p3, age12, h22)을 색인·질의에 덧붙인다.
-C-9 띄어쓰기       : 띄어 쓴 한 글자 + 낱말('야 구')을 붙인 꼴이 KB에 있으면 붙인 낱말을 질의에 덧붙인다.
-D-10·F-14 섹션 카드: 묻는 항목(asked)이 [자료] 섹션들에 얼마나 담겨 있는지 잰다. → tutor의 '자료 밖' 보조 판단
-E-11·E-12 사실 단위: 문장 ID(섹션#소제목.번호)와 숫자+단위 값을 모아, 가드가 후보 답변의 틀린 값 구간을 짧게 잡는 데 쓴다.
-F-13 코드 색인     : 코드 블록의 식별자·문자열·실행 결과를 따로 색인한다.
-(C-8 별칭·영문명 사전은 LLM으로 만들어야 해 운영진 확인 전이라 넣지 않았다. 영어 질문은 v19 번역 검색이 처리한다.)
+기본 켬(v26):
+  C-8 별칭·영문명 사전: data/kb_aliases.json(scripts/build_aliases.py가 kb/만 입력으로 운영진 제공 gpt-5-nano로 만듦,
+                       SPEC §7 '배포 자료를 가공한 것'). 영어 질문에서 영어 이름을 찾아 한국어 이름을 검색 질의와 번역 힌트로 준다.
+  E-11·E-12 사실 단위 : 문장 ID(섹션#소제목.번호)와 숫자+단위 값을 모아, 가드가 '근거 없음' 후보의 틀린 값 구간을 짧게 잡는다.
+기본 끔(실제 채점·공개 세트에서 해가 확인됨, _DEFAULTS 주석 참고) — 스위치 KBPREP_<요소>=1로만 켠다:
+  A-1 2·3위 섹션은 질문과 맞는 소제목 청크만 [자료]에 / A-2 FAQ 질문 색인 / A-3 표 문장화 / B-4 공통 이름 순위 /
+  B-5 같은 사실 인용 바꾸기 / B-6 상투 문구 빼기 / C-7 숫자 정규화 토큰 / C-9 띄어쓰기 합치기 / D-10·F-14 자료 밖 보조 판단 / F-13 코드 색인.
+  기본값이면 영어 질문(별칭이 걸릴 때)을 빼고 튜터·가드 검색과 튜터 동작이 v22와 같다.
 """
 import csv
 import io
+import json
+import logging
 import os
 import re
 from collections import defaultdict
@@ -26,6 +25,7 @@ import numpy as np
 from .kb import Section, _split_h2
 from .textnorm import normalize, tokenize
 
+log = logging.getLogger("halt")
 KBPREP = os.environ.get("KBPREP", "1") == "1"
 
 
@@ -37,7 +37,8 @@ KBPREP = os.environ.get("KBPREP", "1") == "1"
 #     v19~v22 10회 평균 87.18(85.47~88.72)에서 v23 2회 85.06·85.06으로 떨어졌다. 튜터 프롬프트의 93%를 바꾸는 요소라 v24에서 끈다.
 #  v25: 튜터 쪽 전처리를 모두 끈다. 실제 채점 튜터 평균이 v19~v22 10회 87.18 → v23 4회 85.83 → v24(A-1 끔) 4회 86.34로,
 #     검색 전처리(A-3·B-6·C-7·C-9)·A-2·F-13이 남은 v24도 0.84 낮았다. 가드 E-11(틀린 값 구간)만 켠다
-#     (v23·v24 가드 8회 평균 91.01, v19~v22 90.65). 이 값이면 튜터·가드 검색과 튜터 동작은 v22와 같다.
+#     (v23·v24 가드 8회 평균 91.01, v19~v22 90.65).
+#  v26: C-8 별칭 사전을 켠다(영어 질문에서만 동작). 기본값이면 영어 질문을 빼고 튜터·가드 검색과 튜터 동작은 v22와 같다.
 _DEFAULTS = {"B4": "0", "B5": "0", "D10": "0", "A1": "0", "A2": "0", "A3": "0", "B6": "0", "C7": "0", "C9": "0", "F13": "0"}
 
 
@@ -46,16 +47,21 @@ def _on(name: str) -> bool:
 
 
 # ---------------- C-7 숫자·단위 정규화 ----------------
-_MONEY = re.compile(r"(?:(\d+(?:\.\d+)?)\s*만\s*(?:(\d+)\s*천\s*)?|(\d+)\s*천\s*|(\d{1,3}(?:,\d{3})+|\d+)\s*)(?:원|won\b)", re.I)
-_PCT = re.compile(r"(\d+)\s*점\s*(\d+)\s*(?:%p?|퍼센트(?:\s*포인트)?)|(\d+(?:\.\d+)?)\s*(?:%p?|퍼센트(?:\s*포인트)?|percent)", re.I)
+# 숫자는 앞이 숫자·점·쉼표가 아닌 곳에서 시작하고 자릿수에 상한을 둔다(긴 숫자열에서 정규식이 느려지거나
+# float 변환이 넘치던 문제 — 코드 검토 2026-11-20).
+_MONEY = re.compile(r"(?<![\d.,])(?:(\d{1,9}(?:\.\d{1,4})?)\s*만\s*(?:(\d{1,4})\s*천\s*)?|(\d{1,4})\s*천\s*|(\d{1,3}(?:,\d{3}){1,4}|\d{1,12})\s*)(?:원|won\b)", re.I)
+_PCT = re.compile(r"(?<![\d.,])(?:(\d{1,3})\s*점\s*(\d{1,3})\s*(?:%p?|퍼센트(?:\s*포인트)?)|(\d{1,6}(?:\.\d{1,4})?)\s*(?:%p?|퍼센트(?:\s*포인트)?|percent))", re.I)
 _AGE_RANGE = re.compile(r"만\s*(\d{1,2})\s*(?:세)?\s*(?:부터|[~∼\-])\s*(?:만\s*)?(\d{1,2})\s*세")
 _AGE = re.compile(r"(?:만\s*)?(\d{1,2})\s*(?:세|살)(?![금트대계])")
 _HOUR = re.compile(r"(오전|오후|밤|낮|저녁|새벽|아침)?\s*(\d{1,2})\s*시(?![간작험각키도대켜점])")
 
 
 def _num(v: str) -> str:
-    f = float(v)
-    s = str(int(f)) if f == int(f) else ("%g" % f)
+    try:
+        f = float(v)
+        s = str(int(f)) if f == int(f) else ("%g" % f)
+    except (OverflowError, ValueError):
+        s = v
     return s.replace(".", "p")
 
 
@@ -128,8 +134,20 @@ def code_terms(text: str) -> List[str]:
     return out
 
 
+# ---------------- 영어 질문 판별(튜터 v19 번역 검색·C-8 공용) ----------------
+ENG_RATIO_MIN, ENG_MIN_LETTERS = 0.9, 8
+
+
+def is_english(text: str) -> bool:
+    """코드 블록이 없고 글자의 90% 이상이 로마자인 글."""
+    if "```" in text:
+        return False
+    letters = re.findall(r"[A-Za-z가-힣]", text)
+    return len(letters) >= ENG_MIN_LETTERS and sum(c.isascii() for c in letters) / len(letters) >= ENG_RATIO_MIN
+
+
 # ---------------- E-11 숫자+단위 값 ----------------
-_VALUE = re.compile(r"(?<![\w.])(-?\d+(?:[.,]\d+)?)\s*(%p?|퍼센트|[가-힣]{1,2})?")
+_VALUE = re.compile(r"(?<![\w.,])(-?\d{1,12}(?:[.,]\d{1,6})?)(?![\d.,]\d)\s*(%p?|퍼센트|[가-힣]{1,2})?")
 _PARTICLE_TAIL = re.compile(r"(?:이므로|이라서|이라고|이에요|예요|이며|이고|이|가|을|를|은|는|에|의|와|과|도|만)$")
 
 
@@ -162,9 +180,11 @@ def _grams(s: str, n: int = 4) -> Set[str]:
 
 
 class KBPrep:
-    def __init__(self, sections: Dict[str, Section]):
+    def __init__(self, sections: Dict[str, Section], kb_dir=None):
         from .retrieval import BM25  # 순환 import 방지
         self.sections = sections
+        self.kb_dir = kb_dir  # 서버가 load_kb에 쓴 폴더(없으면 KB_DIR 환경변수 또는 기본 kb/)
+        self.section_bm25 = None  # Retriever가 만든 섹션 BM25를 연결한다(B-5 residual_rank에서 씀)
         self.section_ids = list(sections)
         self.tables: Dict[str, Dict[str, str]] = {}
         self.units: Dict[str, List[Unit]] = {}
@@ -230,14 +250,89 @@ class KBPrep:
         self.sent_grams = [(u.sid, u.uid, _grams(u.text)) for sid in self.section_ids for u in self.units[sid]
                            if u.kind in ("sent", "a", "table") and len(u.text) >= 15]
 
+        self._load_aliases()  # C-8
+
         # E-11 섹션별 값 묶음
         self.section_values = {sid: set().union(*[value_keys(u.text) for u in self.units[sid]] or [set()])
                                for sid in self.section_ids}
 
+    # ---- C-8 별칭·영문명 사전 ----
+    _EN_STOP = {"the", "a", "an", "of", "for", "by", "at", "in", "and", "to", "my", "our", "your"}
+    # 이것 하나만으로는 이름이라 볼 수 없는 흔한 영어 낱말(한 낱말짜리 표현은 이 낱말이면 버린다)
+    _EN_GENERIC = {"bank", "card", "check", "debit", "saving", "savings", "point", "points", "reward", "rewards", "account",
+                   "club", "school", "coding", "student", "teen", "teens", "tool", "agent", "assistant", "model", "service",
+                   "program", "activity", "rule", "rules", "guide", "example", "practice", "basket", "fruit", "score", "board"}
+
+    @staticmethod
+    def _en_tokens(text: str) -> List[Tuple[str, str, bool]]:
+        """(비교용 낱말, 원래 낱말, 문장 첫 낱말인지). 관사·전치사는 빼고 복수형 s는 떼고 비교한다."""
+        out, start = [], True
+        for m in re.finditer(r"[A-Za-z0-9]+|[.!?]", str(text)):
+            w = m.group(0)
+            if w in ".!?":
+                start = True
+                continue
+            lw = w.lower()
+            if lw not in KBPrep._EN_STOP:
+                out.append((lw[:-1] if len(lw) > 3 and lw.endswith("s") else lw, w, start))
+            start = False
+        return out
+
+    @staticmethod
+    def _en_words(text: str) -> List[str]:
+        return [w for w, _, _ in KBPrep._en_tokens(text)]
+
+    def _load_aliases(self) -> None:
+        from pathlib import Path
+        self.alias_index: List[Tuple[Tuple[str, ...], str, str]] = []
+        path = Path(os.environ.get("KB_ALIASES", Path(__file__).resolve().parents[1] / "data" / "kb_aliases.json"))
+        try:
+            data = json.loads(path.read_text(encoding="utf-8")).get("aliases", {}) if path.exists() else {}
+            for ko, v in data.items():
+                # 이미 영문인 이름·섹션 ID·파일 이름은 별칭이 필요 없다(검색 질의에 그대로 있음)
+                if not isinstance(ko, str) or not re.search(r"[가-힣]", ko) or re.search(r"(?:PY|PR|FIN)-\d{2}|\.(?:csv|md|py)\b", ko):
+                    continue
+                for en in (v.get("en", []) if isinstance(v, dict) else []):
+                    words = tuple(self._en_words(en)) if isinstance(en, str) else ()
+                    if not words or re.search(r"(?:py|pr|fin)\d{2}", "".join(words)):
+                        continue
+                    if len(words) == 1 and (words[0] in self._EN_GENERIC or len(words[0]) < 4):
+                        continue
+                    self.alias_index.append((words, en, ko))
+        except Exception as e:  # 사전이 깨져도 서버 시작은 막지 않는다(C-8만 꺼짐)
+            log.warning("kb_aliases_load_failed type=%s", type(e).__name__)
+            self.alias_index = []
+        self.alias_index.sort(key=lambda x: -len(x[0]))
+        log.info("kb_aliases_loaded names=%d phrases=%d", len({k for _, _, k in self.alias_index}), len(self.alias_index))
+
+    def alias_matches(self, text: str) -> List[Tuple[str, str]]:
+        """영어 글에서 찾은 (영어 표현, 한국어 이름). 긴 표현부터 찾고, 이미 쓴 낱말은 짧은 표현이 다시 쓰지 않는다.
+        한 낱말짜리 표현은 문장 중간에 대문자로 시작하는 이름일 때만 쓴다('finish' 같은 일반 낱말 오탐 방지)."""
+        if not (_on("C8") and getattr(self, "alias_index", None)):
+            return []
+        toks = self._en_tokens(text)
+        words = [w for w, _, _ in toks]
+        used, out, seen = set(), [], set()
+        for ws, en, ko in self.alias_index:
+            if ko in seen:
+                continue
+            n = len(ws)
+            for i in range(len(words) - n + 1):
+                if tuple(words[i:i + n]) != ws or used & set(range(i, i + n)):
+                    continue
+                if n == 1 and (not toks[i][1][:1].isupper() or toks[i][2]):
+                    continue
+                out.append((en, ko))
+                seen.add(ko)
+                used |= set(range(i, i + n))
+                break
+        return out
+
     # ---- 만들기 도우미 ----
     def _dir(self, sid: str):
         from pathlib import Path
-        return Path(os.environ.get("KB_DIR", Path(__file__).resolve().parents[1] / "kb")) / self.sections[sid].subject
+        root = Path(self.kb_dir) if self.kb_dir else Path(os.environ.get("KB_DIR", Path(__file__).resolve().parents[1] / "kb"))
+        return root / self.sections[sid].subject
 
     def _md(self, sid: str) -> str:
         return (self._dir(sid) / f"{sid}.md").read_text(encoding="utf-8")
@@ -318,8 +413,10 @@ class KBPrep:
         return self._rank_docs(self.faq_bm25.scores(self._toks(self.query_text(query))), [s for s, _ in self.faq], k)
 
     def search_code(self, query: str, k: int = 20):
+        if not _on("F13"):
+            return []
         terms = [t.lower() for t in code_terms(query) if t in self.code_vocab]
-        if not (_on("F13") and len(set(terms)) >= 2):
+        if len(set(terms)) < 2:
             return []
         sc = self.code_bm25.scores(terms)
         return [(self.section_ids[i], float(sc[i])) for i in np.argsort(-sc)[:k] if sc[i] > 0]
@@ -355,7 +452,8 @@ class KBPrep:
         j, sid = max(((len(lg & g) / max(1, len(lg | g)), sid) for sid, g in self._faq_g3), default=(0.0, None))
         return sid if j >= th and sid in candidates else None
 
-    # ---- A-1 소제목 발췌 ----
+    # ---- A-1 소제목 발췌(기본 끔) ----
+    # 주의: 발췌는 청크 글 형식("[섹션ID] 제목 > 소제목", 표는 "[표]")이라 1위 섹션 전문과 형식이 다르다. 켤 때는 형식을 맞출 것.
     def section_excerpt(self, sid: str, query: str, ratio: float = 0.5, max_chunks: int = 2) -> Optional[str]:
         """질문과 맞는 소제목 청크만(청크 BM25 최고점의 ratio 이상, 최대 max_chunks개, 원래 순서)."""
         if not (_on("A1") and self.chunk_bm25 is not None):
@@ -394,7 +492,8 @@ class KBPrep:
         pos = {s: i for i, s in enumerate(self.section_ids)}
         return sorted(((s, float(sc[pos[s]])) for s in sids), key=lambda x: -x[1])
 
-    # ---- D-10·F-14 ----
+    # ---- D-10·F-14(기본 끔) ----
+    # 주의: coverage는 전처리 색인 글 기준이라 LLM에게 보인 [자료]와 다를 수 있다(B-6로 뺀 문장, A-3 표 문장 포함).
     def coverage(self, asked: str, sids: List[str]) -> float:
         """묻는 항목(asked)의 글자 2-gram 중 [자료] 섹션들(카드: 본문·표 문장·Q)에 있는 비율."""
         a = re.sub(r"[\s\W_]+", "", normalize(asked))
@@ -405,12 +504,15 @@ class KBPrep:
         return sum(g in text for g in grams) / len(grams)
 
     # ---- E-11 ----
-    def wrong_value_spans(self, candidate: str, sids: List[str], question: str = "") -> List[str]:
+    def wrong_value_spans(self, candidate: str, sids: List[str], question: str = "", require_known: bool = False) -> List[str]:
         """후보 답변에서 [자료] 섹션들과 질문 어디에도 없는 숫자+단위 값을, 앞 수식어 두 낱말까지 붙여 짧은 구간으로 돌려준다."""
         known = set().union(*[self.section_values.get(s, set()) for s in sids] or [set()]) | value_keys(question)
         q_nums = set(re.findall(r"\d+(?:\.\d+)?", _SID_REF.sub(" ", str(question)).replace(",", "")))
         spans = []
         candidate = _SID_REF.sub(" ", candidate)
+        cand_keys = value_keys(candidate)
+        if require_known and cand_keys and not (cand_keys & known):
+            return []  # 검색이 약한 입력(영어)에서 후보 답변의 값이 [자료]에서 하나도 확인되지 않으면 엉뚱한 섹션일 수 있어 다듬지 않는다
         for clause in re.split(r"(?<=[.!?])\s+|,\s+|\s+(?:그리고|따라서|그래서)\s+", candidate):
             for m in _VALUE.finditer(clause):
                 keys = value_keys(m.group(0))

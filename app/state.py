@@ -27,7 +27,7 @@ class AppState:
 async def build_state(settings: Settings) -> AppState:
     t0 = time.perf_counter()
     sections = load_kb(settings.kb_dir)
-    retriever = Retriever(sections)
+    retriever = Retriever(sections, kb_dir=settings.kb_dir)
     llm = LLM(settings)
     log.info("kb_loaded sections=%d chunks=%d", len(sections), len(retriever.chunks))
 

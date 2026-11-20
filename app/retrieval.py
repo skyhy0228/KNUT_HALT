@@ -55,7 +55,7 @@ def rrf(rankings: Sequence[Ranked], k: int = 60) -> Ranked:
 
 
 class Retriever:
-    def __init__(self, sections: Dict[str, Section]):
+    def __init__(self, sections: Dict[str, Section], kb_dir=None):
         self.sections = sections
         self.section_ids = list(sections)
         self.chunks = [c for s in self.section_ids for c in sections[s].chunks]
@@ -63,8 +63,9 @@ class Retriever:
         self.prep = None
         from .kbprep import KBPREP, KBPrep
         if KBPREP:
-            # v23 KB 전처리: 섹션·청크 BM25를 전처리한 색인 글(표 문장, 상투 문구 뺌, 숫자 정규화 토큰)로 만든다.
-            self.prep = KBPrep(sections)
+            # KB 전처리(v23~): 섹션·청크 BM25를 전처리 색인 글로 만든다. 기본값(v26)은 A-3·B-6·C-7이 꺼져 있어 v22 색인과 같고,
+            # 켜면 표 문장·상투 문구 빼기·숫자 정규화 토큰이 들어간다.
+            self.prep = KBPrep(sections, kb_dir)
             self.bm25 = BM25([self.prep._toks(self.prep.section_index_text[s]) for s in self.section_ids])
             self.bm25_chunks = BM25([self.prep._toks(t) for t in self.prep.chunk_index_text])
             self.prep.section_bm25, self.prep.chunk_bm25 = self.bm25, self.bm25_chunks

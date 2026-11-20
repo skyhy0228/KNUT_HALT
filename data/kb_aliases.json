@@ -1,0 +1,923 @@
+{
+ "_about": {
+  "what": "C-8 별칭·영문명 사전: KB 속 고유한 이름 → 영어 표현",
+  "made_with": "운영진 제공 채팅 모델 openai/gpt-5-nano(scripts/build_aliases.py), 입력은 kb/만",
+  "made_at": "2026-11-20 12:59 UTC",
+  "check": "한국어 이름이 KB 본문에 글자 그대로 있는 것만, 영어 표현은 영문·숫자·공백·하이픈만"
+ },
+ "aliases": {
+  "/clone": {
+   "en": [
+    "clone command",
+    "Clone operation"
+   ],
+   "sections": [
+    "PR-03-04"
+   ]
+  },
+  "Agents.md": {
+   "en": [
+    "Agents.md",
+    "the Agents.md guideline file",
+    "Agents.md instruction file",
+    "the project rules file Agents.md"
+   ],
+   "sections": [
+    "PR-02-01",
+    "PR-02-02"
+   ]
+  },
+  "Helpy": {
+   "en": [
+    "Helpy",
+    "the Helpy assistant",
+    "the Helpy service",
+    "the AI assistant Helpy",
+    "Helpy AI assistant",
+    "Helpy assistant",
+    "Helpy AI",
+    "Helpy chatbot",
+    "Helpy guide",
+    "the Helpy AI assistant",
+    "Helpy service",
+    "the Helpy AI"
+   ],
+   "sections": [
+    "PR-01-02",
+    "PR-01-04",
+    "PR-02-02",
+    "PR-02-04",
+    "PR-03-01",
+    "PR-03-03",
+    "PR-04-01",
+    "PR-04-02",
+    "PR-04-03",
+    "PR-04-04"
+   ]
+  },
+  "Helpy Edu": {
+   "en": [
+    "the Helpy Edu model",
+    "Helpy Edu",
+    "Helpy Edu model"
+   ],
+   "sections": [
+    "PR-01-01"
+   ]
+  },
+  "Helpy Pro": {
+   "en": [
+    "the Helpy Pro model",
+    "Helpy Pro",
+    "Helpy Pro model",
+    "Helpy Pro AI"
+   ],
+   "sections": [
+    "PR-01-01",
+    "PR-03-02"
+   ]
+  },
+  "HelpyCode": {
+   "en": [
+    "HelpyCode tool",
+    "the HelpyCode coding agent",
+    "HelpyCode",
+    "HelpyCode AI coding agent",
+    "the HelpyCode coding assistant",
+    "HelpyCode assistant",
+    "HelpyCode terminal",
+    "help-code assistant",
+    "Helpy Code"
+   ],
+   "sections": [
+    "PR-01-01",
+    "PR-02-01",
+    "PR-02-02",
+    "PR-02-03",
+    "PR-03-01",
+    "PR-03-02",
+    "PR-03-03",
+    "PR-03-04"
+   ]
+  },
+  "PR-01-02": {
+   "en": [
+    "PR-01-02",
+    "the PR-01-02 prompt"
+   ],
+   "sections": [
+    "PR-01-02"
+   ]
+  },
+  "PR-01-04": {
+   "en": [
+    "PR-01-04"
+   ],
+   "sections": [
+    "PR-01-04"
+   ]
+  },
+  "PR-02-02-table1.csv": {
+   "en": [
+    "table PR-02-02-table1.csv",
+    "PR-02-02 table1 CSV",
+    "PR-02-02-table1.csv"
+   ],
+   "sections": [
+    "PR-02-02"
+   ]
+  },
+  "PR-03-01-table1.csv": {
+   "en": [
+    "PR-03-01-table1.csv",
+    "PR-03-01 Table 1 CSV"
+   ],
+   "sections": [
+    "PR-03-01"
+   ]
+  },
+  "PR-03-02-table1.csv": {
+   "en": [
+    "PR-03-02-table1.csv",
+    "PR-03-02 data table",
+    "table1 for PR-03-02"
+   ],
+   "sections": [
+    "PR-03-02"
+   ]
+  },
+  "PR-03-04": {
+   "en": [
+    "PR-03-04",
+    "PR-03-04 project",
+    "PR 03 04"
+   ],
+   "sections": [
+    "PR-03-04"
+   ]
+  },
+  "PY-04-03-table1.csv": {
+   "en": [
+    "PY-04-03-table1.csv file"
+   ],
+   "sections": [
+    "PY-04-03"
+   ]
+  },
+  "apple": {
+   "en": [
+    "a variable named apple",
+    "the apple variable",
+    "apple value"
+   ],
+   "sections": [
+    "PY-01-03"
+   ]
+  },
+  "basket": {
+   "en": [
+    "a variable named basket",
+    "the basket variable",
+    "basket value"
+   ],
+   "sections": [
+    "PY-01-03"
+   ]
+  },
+  "basket.txt": {
+   "en": [
+    "the basket.txt file",
+    "basket log file",
+    "the fruit basket data file"
+   ],
+   "sections": [
+    "PY-04-03"
+   ]
+  },
+  "calculate": {
+   "en": [
+    "calculate module",
+    "calculate.py"
+   ],
+   "sections": [
+    "PY-04-02"
+   ]
+  },
+  "div": {
+   "en": [
+    "the div variable",
+    "a variable named div",
+    "div value"
+   ],
+   "sections": [
+    "PY-01-03"
+   ]
+  },
+  "first": {
+   "en": [
+    "the first input variable",
+    "first value",
+    "a variable named first"
+   ],
+   "sections": [
+    "PY-01-03"
+   ]
+  },
+  "group": {
+   "en": [
+    "the group variable",
+    "a variable named group",
+    "group size value"
+   ],
+   "sections": [
+    "PY-01-03"
+   ]
+  },
+  "kkumtle": {
+   "en": [
+    "kkumtle",
+    "kkumtle Practice Helper Module",
+    "Kkumtle Utility",
+    "Kkumtle Assistant"
+   ],
+   "sections": [
+    "PY-01-01",
+    "PY-04-04"
+   ]
+  },
+  "math": {
+   "en": [
+    "math module"
+   ],
+   "sections": [
+    "PY-04-02"
+   ]
+  },
+  "minus": {
+   "en": [
+    "the minus variable",
+    "a variable named minus",
+    "minus value"
+   ],
+   "sections": [
+    "PY-01-03"
+   ]
+  },
+  "multi": {
+   "en": [
+    "the multi variable",
+    "a variable named multi",
+    "multi value"
+   ],
+   "sections": [
+    "PY-01-03"
+   ]
+  },
+  "plus": {
+   "en": [
+    "the plus variable",
+    "a variable named plus",
+    "plus value"
+   ],
+   "sections": [
+    "PY-01-03"
+   ]
+  },
+  "quoti": {
+   "en": [
+    "the quoti variable",
+    "a variable named quoti",
+    "quoti value"
+   ],
+   "sections": [
+    "PY-01-03"
+   ]
+  },
+  "random": {
+   "en": [
+    "random module"
+   ],
+   "sections": [
+    "PY-04-02"
+   ]
+  },
+  "remain": {
+   "en": [
+    "the remain variable",
+    "a variable named remain",
+    "remain value"
+   ],
+   "sections": [
+    "PY-01-03"
+   ]
+  },
+  "score": {
+   "en": [
+    "the score variable",
+    "a variable named score",
+    "score value"
+   ],
+   "sections": [
+    "PY-01-03"
+   ]
+  },
+  "second": {
+   "en": [
+    "the second input variable",
+    "second value",
+    "a variable named second"
+   ],
+   "sections": [
+    "PY-01-03"
+   ]
+  },
+  "square": {
+   "en": [
+    "the square variable",
+    "a variable named square",
+    "square value"
+   ],
+   "sections": [
+    "PY-01-03"
+   ]
+  },
+  "summary-note": {
+   "en": [
+    "summary-note card",
+    "presentation summary card",
+    "summary card for presentations"
+   ],
+   "sections": [
+    "PR-02-03"
+   ]
+  },
+  "거름망 프롬프트": {
+   "en": [
+    "Filtering Prompt",
+    "Georeummang Prompt",
+    "Strainer Prompt"
+   ],
+   "sections": [
+    "PR-04-04"
+   ]
+  },
+  "계산기.py": {
+   "en": [
+    "Calculator.py",
+    "Calculator script",
+    "Python calculator"
+   ],
+   "sections": [
+    "PR-03-02"
+   ]
+  },
+  "과일 바구니": {
+   "en": [
+    "Fruit Basket",
+    "Gwail Basket"
+   ],
+   "sections": [
+    "PY-03-04"
+   ]
+  },
+  "기록처리.js": {
+   "en": [
+    "RecordingProcessor.js",
+    "Record Processing",
+    "Girok Cheori.js"
+   ],
+   "sections": [
+    "PR-03-04"
+   ]
+  },
+  "꿈틀 도우미": {
+   "en": [
+    "Kkumtle Helper",
+    "Kkumtle Assistant",
+    "Kkumtle Utility Helper"
+   ],
+   "sections": [
+    "PY-04-04"
+   ]
+  },
+  "꿈틀 도우미 만나기": {
+   "en": [
+    "Meeting the Kkumtle Helper",
+    "Kkumtle Helper Encounter",
+    "Kkumtle Helper Introduction"
+   ],
+   "sections": [
+    "PY-04-04"
+   ]
+  },
+  "꿈틀 동아리": {
+   "en": [
+    "Dreaming Worm Club",
+    "Wriggle Club",
+    "Kkumteul Club"
+   ],
+   "sections": [
+    "PY-04-02"
+   ]
+  },
+  "꿈틀 중학교": {
+   "en": [
+    "Ggumteul Middle School",
+    "Dreamy Wiggle Middle School",
+    "Ggumteul Junior High School"
+   ],
+   "sections": [
+    "PY-01-02"
+   ]
+  },
+  "꿈틀 중학교 동아리": {
+   "en": [
+    "Kkumteul Middle School Club",
+    "the Kkumteul Middle School club"
+   ],
+   "sections": [
+    "PY-02-03"
+   ]
+  },
+  "꿈틀 중학교 야구 점수판": {
+   "en": [
+    "Kkumteul Middle School Baseball Scoreboard",
+    "the baseball scoreboard for Kkumteul Middle School"
+   ],
+   "sections": [
+    "PY-02-03"
+   ]
+  },
+  "꿈틀 중학교 코딩 동아리": {
+   "en": [
+    "Kkumtle Middle School Coding Club",
+    "Dream Twig Coding Club",
+    "Kkumteul Middle School Coding Club",
+    "Dreaming Middle School Coding Club",
+    "Kkumteul MS Coding Club",
+    "Dream-Teal Middle School Coding Club",
+    "Kkumteul Jung-hak-gyo Coding Club",
+    "Dreamtwist Middle School Coding Club",
+    "Dreamtul Middle School Coding Club",
+    "Ggumteul Jung Hakgyo Coding Dongari",
+    "Dreamteul Middle School Coding Club",
+    "Dreamteul Junior High School Coding Club",
+    "Kkumteul Junior High School Coding Club",
+    "Kkumteul Jung-hak-gyo Coding Dongari",
+    "Dreamtle Middle School Coding Club",
+    "Kkumtle Coding Club at Middle School",
+    "Kkumtle Middle School Coding Group"
+   ],
+   "sections": [
+    "PY-01-01",
+    "PY-02-01",
+    "PY-02-02",
+    "PY-02-04",
+    "PY-03-02",
+    "PY-03-03",
+    "PY-03-04",
+    "PY-04-01",
+    "PY-04-03",
+    "PY-04-04"
+   ]
+  },
+  "꿈틀 토끼": {
+   "en": [
+    "Ggumteul Rabbit",
+    "Dreaming Rabbit",
+    "Wriggling Rabbit"
+   ],
+   "sections": [
+    "PY-01-02"
+   ]
+  },
+  "다람 문구점": {
+   "en": [
+    "Daram Stationery Shop",
+    "Daram Stationery",
+    "Daram Mun-gujeom"
+   ],
+   "sections": [
+    "FIN-03-04"
+   ]
+  },
+  "다람쥐 꿈모으기 정기예금": {
+   "en": [
+    "Dream-Saving Fixed Deposit",
+    "Dream-Saving Regular Deposit",
+    "Daramjwi Kkummoegi Jeonggi Yegeum",
+    "Daramjwi Dream-Savings Fixed Deposit"
+   ],
+   "sections": [
+    "FIN-02-01",
+    "FIN-02-04"
+   ]
+  },
+  "다람쥐 새싹적금": {
+   "en": [
+    "Sprout Savings",
+    "Daramjwi Saessak Jeokgeum",
+    "Squirrel Sprout Savings",
+    "Sprout Savings by Squirrel",
+    "Squirrel Sprout Investment",
+    "Daramjwi Saesakjegeum Savings"
+   ],
+   "sections": [
+    "FIN-02-01",
+    "FIN-02-02",
+    "FIN-02-03"
+   ]
+  },
+  "다람쥐 첫걸음 통장": {
+   "en": [
+    "Squirrel First Steps Savings",
+    "Daramjwi Cheotgeoreum Tongjang",
+    "Squirrel First Steps Passbook",
+    "Daramjwi First Steps Passbook",
+    "Squirrel First Step Passbook",
+    "Squirrel First Step Savings Account",
+    "Squirrel First-Step Passbook"
+   ],
+   "sections": [
+    "FIN-01-02",
+    "FIN-01-03",
+    "FIN-01-04",
+    "FIN-04-01",
+    "FIN-04-02",
+    "FIN-04-04"
+   ]
+  },
+  "다람쥐 틴즈 체크카드": {
+   "en": [
+    "Squirrel Teens Check Card",
+    "Daramjwi Teens Check Card",
+    "Squirrel Teens Debit Card",
+    "Daramjwi Teinje Chekeu Kadeu",
+    "Daramjwi Teens Chekeukaedeu"
+   ],
+   "sections": [
+    "FIN-01-02",
+    "FIN-03-01",
+    "FIN-03-02",
+    "FIN-04-01",
+    "FIN-04-02",
+    "FIN-04-04"
+   ]
+  },
+  "다람쥐은행": {
+   "en": [
+    "Squirrel Bank",
+    "Daramjwi Bank",
+    "Squirrel Savings Bank",
+    "the Squirrel Bank",
+    "Daramjwi Eunhaeng"
+   ],
+   "sections": [
+    "FIN-01-02",
+    "FIN-01-03",
+    "FIN-01-04",
+    "FIN-02-01",
+    "FIN-02-02",
+    "FIN-02-04",
+    "FIN-03-01",
+    "FIN-03-02",
+    "FIN-03-03",
+    "FIN-04-01",
+    "FIN-04-02",
+    "FIN-04-04"
+   ]
+  },
+  "다온": {
+   "en": [
+    "Daon",
+    "Da-on",
+    "the student Daon"
+   ],
+   "sections": [
+    "FIN-04-03"
+   ]
+  },
+  "다이아몬드 그리기": {
+   "en": [
+    "Diamond Drawing",
+    "Daiamondeu geurigi"
+   ],
+   "sections": [
+    "PY-03-04"
+   ]
+  },
+  "도토리 포인트": {
+   "en": [
+    "Acorn Points",
+    "Dotorri Points",
+    "Dotori Points",
+    "Acorn Rewards",
+    "Acorn Reward Points"
+   ],
+   "sections": [
+    "FIN-01-02",
+    "FIN-03-01",
+    "FIN-03-02",
+    "FIN-04-02"
+   ]
+  },
+  "독서 기록 화면": {
+   "en": [
+    "Reading Log Screen",
+    "Dokseo Girok Hwamyen"
+   ],
+   "sections": [
+    "PR-03-01"
+   ]
+  },
+  "독서노트": {
+   "en": [
+    "Reading Notebook",
+    "Shared Reading Notebook",
+    "Dokseo Noteu"
+   ],
+   "sections": [
+    "PR-03-04"
+   ]
+  },
+  "독서화면.js": {
+   "en": [
+    "ReadingScreen.js",
+    "Reading Screen",
+    "Dokseo Hwimyeon.js"
+   ],
+   "sections": [
+    "PR-03-04"
+   ]
+  },
+  "동아리 과일 바구니 확인 실습": {
+   "en": [
+    "Fruit Basket Checking Practice",
+    "Fruit Basket Check Practice",
+    "Fruit Basket Verification Exercise"
+   ],
+   "sections": [
+    "PY-02-03"
+   ]
+  },
+  "되감기 지점": {
+   "en": [
+    "Rewind Point",
+    "Doegamgi Jijeom"
+   ],
+   "sections": [
+    "PR-03-01"
+   ]
+  },
+  "마무리": {
+   "en": [
+    "Wrap-up",
+    "Finish"
+   ],
+   "sections": [
+    "PR-01-04"
+   ]
+  },
+  "바람 모델": {
+   "en": [
+    "Wind model",
+    "Baram model"
+   ],
+   "sections": [
+    "PR-01-01"
+   ]
+  },
+  "바이브 코딩": {
+   "en": [
+    "Vibe Coding",
+    "Baibeu Coding"
+   ],
+   "sections": [
+    "PR-03-01"
+   ]
+  },
+  "박수 게임": {
+   "en": [
+    "Clap Game",
+    "Clapping Game",
+    "The Clap Game"
+   ],
+   "sections": [
+    "PY-02-03"
+   ]
+  },
+  "별 계단": {
+   "en": [
+    "Star Staircase",
+    "Star Steps",
+    "Starry Steps"
+   ],
+   "sections": [
+    "PY-02-04"
+   ]
+  },
+  "새싹이": {
+   "en": [
+    "Saessaki",
+    "Seedling",
+    "Sprout"
+   ],
+   "sections": [
+    "PY-01-02"
+   ]
+  },
+  "색 공 주머니 실습": {
+   "en": [
+    "Color Ball Pouch Practice",
+    "Colored Ball Pouch Exercise"
+   ],
+   "sections": [
+    "PY-02-02"
+   ]
+  },
+  "솔숲 쉼터": {
+   "en": [
+    "Solsup Shelter",
+    "Solsup Shelter activity",
+    "Solsup Shelter program"
+   ],
+   "sections": [
+    "PR-04-03"
+   ]
+  },
+  "숫자 맞히기 실습": {
+   "en": [
+    "Number Guessing Practice",
+    "Guess-the-Number Exercise"
+   ],
+   "sections": [
+    "PY-02-02"
+   ]
+  },
+  "숫자 카드 실습": {
+   "en": [
+    "Number Card Practice",
+    "Number Card Exercise"
+   ],
+   "sections": [
+    "PY-02-02"
+   ]
+  },
+  "안심센터": {
+   "en": [
+    "Safe Center",
+    "Safe Assurance Center"
+   ],
+   "sections": [
+    "FIN-03-03"
+   ]
+  },
+  "안전 점검하기": {
+   "en": [
+    "Safety Check",
+    "Safety Inspection"
+   ],
+   "sections": [
+    "PR-01-04"
+   ]
+  },
+  "야구 점수판": {
+   "en": [
+    "Baseball Scoreboard",
+    "Yagu Jeomsupan"
+   ],
+   "sections": [
+    "PY-03-04"
+   ]
+  },
+  "용돈 기입장": {
+   "en": [
+    "Allowance ledger",
+    "Pocket-money ledger",
+    "Yongdon Giipjang"
+   ],
+   "sections": [
+    "FIN-01-01"
+   ]
+  },
+  "점수 모으기": {
+   "en": [
+    "Score Gathering",
+    "Score Collector",
+    "Point Gathering"
+   ],
+   "sections": [
+    "PY-02-04"
+   ]
+  },
+  "준비": {
+   "en": [
+    "Preparation",
+    "Getting ready"
+   ],
+   "sections": [
+    "PR-01-04"
+   ]
+  },
+  "준비물 챙기기": {
+   "en": [
+    "Packing Supplies",
+    "Getting Materials Ready"
+   ],
+   "sections": [
+    "PR-01-04"
+   ]
+  },
+  "질문으로 마무리하기": {
+   "en": [
+    "Ending with a Question",
+    "Jilmun-euro MamuRigi"
+   ],
+   "sections": [
+    "PY-03-04"
+   ]
+  },
+  "차트자료.csv": {
+   "en": [
+    "Chart data CSV",
+    "Music chart data CSV",
+    "Chart data file"
+   ],
+   "sections": [
+    "PR-03-03"
+   ]
+  },
+  "청소년상담복지센터": {
+   "en": [
+    "Youth Counseling Welfare Center",
+    "Center for Youth Counseling and Welfare"
+   ],
+   "sections": [
+    "FIN-04-03"
+   ]
+  },
+  "축제 계획 연습": {
+   "en": [
+    "Festival Planning Practice"
+   ],
+   "sections": [
+    "PR-01-04"
+   ]
+  },
+  "축제 준비 분류 연습": {
+   "en": [
+    "Festival Preparation Classification Practice",
+    "Festival Prep Classification Exercise"
+   ],
+   "sections": [
+    "PR-01-04"
+   ]
+  },
+  "하람이": {
+   "en": [
+    "Student Haram",
+    "Haram-i"
+   ],
+   "sections": [
+    "FIN-01-01"
+   ]
+  },
+  "학점 계산하기": {
+   "en": [
+    "Grade Calculation",
+    "Hakjeom Gyesanagi"
+   ],
+   "sections": [
+    "PY-03-04"
+   ]
+  },
+  "한국도박문제예방치유원": {
+   "en": [
+    "Korea Gambling Problem Prevention and Healing Center",
+    "Korean Gambling Problem Prevention and Healing Institute"
+   ],
+   "sections": [
+    "FIN-04-03"
+   ]
+  },
+  "확인": {
+   "en": [
+    "Check",
+    "Verification"
+   ],
+   "sections": [
+    "PR-01-04"
+   ]
+  },
+  "확인검사.js": {
+   "en": [
+    "VerificationCheck.js",
+    "Check Verification",
+    "Hwagin Geomsa.js"
+   ],
+   "sections": [
+    "PR-03-04"
+   ]
+  }
+ }
+}
