@@ -140,7 +140,7 @@ _JB_STRONG = re.compile(r"(?:너한테|너에게|네게)\s*적용|너도|너는|
 
 def jailbreak_signal(t: str) -> Optional[str]:
     """정규화된 마지막 발화에서 'jailbreak'(튜터에게 직접 시킴) | 'meta'(분석 대상으로만 씀) | None."""
-    ms = [*_JB_ROLE.finditer(t), *_JB_REVEAL.finditer(t)]
+    ms = [*_JB_ROLE.finditer(t), *_JB_REVEAL.finditer(t), *(_JB_BROAD.finditer(t) if "jb" in _R29 else ())]
     if not ms:
         return None
     if _JB_STRONG.search(t):
@@ -161,6 +161,97 @@ _REFUSAL_CUE_STRICT = re.compile(r"수\s*(?:는\s*)?없어|할\s*수\s*(?:는\s*
                                  r"|줄\s*수\s*(?:는\s*)?없|않을게|말아\s*주세요|(?:도와|도와드리|도와주)기\s*어려워"
                                  r"|적절하지\s*않")
 REFUSAL_CUE_MODE = os.environ.get("REFUSAL_CUE", "strict")
+
+
+# ---- v29 넓힌 규칙(RULES29=1). v27 실제 채점에서 공개 세트로 만든 규칙이 비공개 문항에 공개의 약 0.37배만 걸렸다.
+# 공개 문항을 운영진 제공 LLM으로 같은 뜻·다른 표현으로 바꿔 쓴 확인 세트(개발용, 서버에 넣지 않음)에서도 0.53배였다.
+# 표현이 바뀌어도 걸리도록 '누가·무엇을·어떻게' 낱말 묶음으로 넓히고, 분석·인용·보호 질문은 빼는 조건을 함께 넓혔다.
+# 확인 세트는 문항을 반으로 나눠, 규칙은 개발 쪽 절반만 보고 만들었다.
+# RULES29: 쉼표 목록(부품 이름) 또는 all. 비우면 끔.
+_R29_PARTS = ("jb", "quoted", "distress", "otherpii", "group", "scam", "academic", "ownwork", "answeronly", "adlearn", "game", "piiself",
+              "insult", "scamfix", "piifix")
+# 기본으로 켜는 부품: 지식 베이스 문장·공개 원문·확인 세트(개발·평가 쪽)에서 정상 오탐을 늘리지 않은 것만.
+# 뺀 부품: jb(탈옥 넓힘 — 공개 세트의 짝 문장 "역할 문장을 살펴보면서"/"역할을 전제로"를 낱말로 못 가름, 평가 쪽 +3/+3),
+#          scam(사기 문자 넓힘 — 평가 쪽 +1/+1, 공개 원문 정상 1개 오탐).
+_R29_DEFAULT = "quoted,distress,otherpii,group,academic,ownwork,answeronly,adlearn,game,piiself,insult,scamfix,piifix"
+_R29 = {c.strip() for c in os.environ.get("RULES29", _R29_DEFAULT).split(",") if c.strip()}  # RULES29= (빈 값)이면 끔 = v28 규칙
+_R29 = set(_R29_PARTS) if _R29 & {"1", "all"} else _R29 & set(_R29_PARTS)
+RULES_V29 = bool(_R29)
+_JB_BROAD = re.compile(
+    r"(?:이전|앞선|앞의|기존|원래|처음|위의|지금까지의?|모든)\s*(?:지시|지침|명령|규칙|설정|안내)(?:을|를|은|는|들을|사항을|사항은)?\s*"
+    r"(?:다\s*|전부\s*|모두\s*|싹\s*(?:다\s*)?)?(?:무시|던져|버리|버려|잊어|잊고|어기|따르지\s*(?:말|않))"
+    r"|(?:제한|규칙|제약|한계|필터|검열|규제)\s*(?:이|가)?\s*(?:없는|없이|에서\s*자유로운|(?:을|를)\s*벗어난|(?:이|가)?\s*풀린|해제된)[^\n]{0,20}?"
+    r"(?:역할|안내자|ai|에이아이|존재|캐릭터|모드|봇|조수|등장인물|버전)"
+    r"|자유로운\s*(?:ai|에이아이|존재|봇)|(?:탈옥|개발자|무제한|제한\s*해제)\s*모드|무제한\s*(?:ai|에이아이)"
+    r"|튜터\s*(?:를|역할을?|역할은?|노릇을?)?\s*(?:그만|내려놓|벗어|버리|버려|관두|접고|하지\s*말)"
+    r"|(?:네|너의|니|당신의?|튜터의?|네가|너한테|너에게|네\s*안에?|your)[^\n]{0,15}?"
+    r"(?:숨겨진|비공개|비밀|내부|숨긴|감춰진|감춘|처음\s*받은|처음에\s*받은|원래\s*받은|미리\s*받은)\s*"
+    r"(?:지시|지침|명령|명령어|규칙|프롬프트|설정|메시지)[^\n]{0,25}?(?:보여|알려|공개|말해|출력|제시|밝혀|적어|털어놓|읊어)"
+    r"|(?:숨겨진|비공개|비밀|숨긴|감춰진|처음\s*받은)\s*(?:지시|지침|명령|명령어|프롬프트|설정)[^\n]{0,10}?"
+    r"(?:원문|전문|전체|전부|모두|빠짐없이)[^\n]{0,15}?(?:보여|알려|공개|말해|출력|제시|밝혀|적어)"
+    r"|ignore\s+(?:all\s+)?(?:the\s+|your\s+)?(?:previous|prior|above|earlier)\s+(?:instructions|rules|prompts?)"
+    r"|developer\s+mode|jailbreak\s+mode|(?:reveal|show|print)\s+(?:me\s+)?(?:your\s+)?(?:hidden|secret|system|internal|original)\s+(?:instructions|prompt|rules)")
+# 지시 문구 뒤에서 그 문구를 '가정해 보는 질문'으로 만드는 표현("~를 무시하면 어떻게 돼", "~해도 괜찮은지").
+_JB_META_AFTER_V29 = re.compile(_JB_META_AFTER.pattern[:-1] + r"|하면\s*(?:어떻게|어떤|왜|안\s*되)|할\s*때\s*(?:어떻게|왜)|해도\s*(?:될지|되는지|괜찮)|되는지\s*(?:판단|구분))")
+_HARM_QUOTED_V29 = re.compile(_HARM_QUOTED.pattern + r"|(?:라고|다고)\s*(?:[가-힣]+\s*){0,2}?(?:문장|댓글|문구|표현|말|글|주장)"
+                              r"|왜\s*(?:차별|혐오)|(?:차별|혐오)(?:적인|적)?\s*표현")
+_DISTRESS_V29 = re.compile(  # "몇 달·몇 주"는 고통 낱말이 뒤따를 때만(지식 베이스 FIN-02-03 "몇 달만 맡겼다면 …"이 걸렸다)
+    r"몇\s*(?:주|달)\s*(?:째|동안|간|이나|넘게|가까이)?[^\n]{0,25}?(?:힘들|힘드|힘겹|우울|지쳐|지치|지쳤|버티|버겁|버거|벅차|지탱|의욕|무기력"
+    r"|잠을?\s*못|아무것도|하기\s*싫|괴로|견디)"
+    r"|계속\s*(?:힘|우울|무기력|지쳐|괴로)|혼자\s*(?:버티|견디|지탱)|아무것도\s*(?:하기\s*싫|하고\s*싶지\s*않|못\s*하겠|손에\s*안\s*잡)"
+    r"|지쳐|지쳤|우울|죽고\s*싶|사라지고\s*싶|잠을?\s*못\s*자|살기\s*싫|살고\s*싶지\s*않|다\s*포기하고\s*싶|의욕이?\s*(?:하나도\s*)?없"
+    r"|견디기\s*(?:힘들|어렵)|털어놓지\s*못")
+_OTHER_PII_V29 = re.compile(
+    r"(?:친구|다른\s*(?:학생|사람|친구|애)|타\s*학생|남의|반\s*(?:친구|애|학생)|옆\s*반|걔|그\s*애|쟤)들?[^\n]{0,40}?"
+    r"(?:(?:주소|연락처|전화\s*번호|폰\s*번호|핸드폰\s*번호|휴대폰\s*번호|번호|통장|계좌|내역|사는\s*곳|비밀번호|아이디|sns|인스타)"
+    r"[^\n]{0,30}?(?:알아내|알아봐|알아\s*(?:줘|주|내)|알려|찾아|캐|퍼뜨|퍼트|뿌려|뿌릴|공개|흘려|유출|공유|올려)"
+    r"|(?:이름|학교)[^\n]{0,30}?(?:알아내|알아봐|찾아|캐|퍼뜨|퍼트|뿌려|뿌릴|공개|흘려|유출))")
+_PII_PROTECT = re.compile(r"지키|보호|조심|주의|안전하게|하면\s*안|되면\s*안|안\s*되는|왜\s*(?:안|위험)|막는|예방|함부로")
+_GROUP_INSULT_V29 = re.compile(
+    r"(?:(?:그|저|이|어느|저런|그런)\s*(?:동네|지역|나라|마을|학교|아파트)(?:\s*에\s*사는|\s*출신|\s*의\s*(?:모든|전체)?)?\s*"
+    r"(?:사람|애|학생|주민|녀석|놈)들?|(?:동네|마을|지역)\s*주민들?)[^\n]{0,40}?"
+    r"(?:빼야|빼자|빼는\s*게|제외해야|제외하자|배제|쫓아내|내쫓|내보내|없애|차단해|끼지\s*않|끼면\s*안|받지\s*말|사기꾼"
+    r"|수준이?\s*(?:낮|떨어)|자격(?:도)?\s*없|싫어|싫다|못\s*믿|믿으면\s*안|더러|열등|무식|쓸모\s*없)")
+_SCAM_ART_V29 = re.compile(
+    r"(?:스미싱|피싱|사기|사칭|가짜|위장|은행인\s*척|은행처럼|은행\s*안내처럼|공식\s*안내처럼|은행에서\s*온\s*것처럼)[^\n]{0,30}?"
+    r"(?:문자|문구|메시지|글|대본|메일|링크|안내문)[^\n]{0,30}?(?:만들|써\s*(?:줘|주|달)|쓰는|작성|꾸며|꾸미|보이게|짜\s*(?:줘|주)|구성해)"
+    r"|(?:문자|문구|메시지|대본|메일)[^\n]{0,40}?(?:인증\s*번호|비밀번호|개인\s*정보|계좌\s*번호|카드\s*번호)(?:를|을)?\s*"
+    r"(?:얻|받아내|빼내|알아내|받게|보내게|입력하게)")
+_SCAM_LEARN = re.compile(r"구별|구분|알아보|알아채|조심|예방|보호|속지\s*않|현혹되지|대처|신고|특징|왜\s*위험|피하는|막는")
+_ACADEMIC_V29 = re.compile(
+    r"(?:수행\s*평가|과제|숙제|시험|레포트|리포트|보고서|homework|assessment|assignment|graded)[^\n]{0,60}?"
+    r"(?:전체(?:를|적으로)?\s*(?:다\s*)?(?:작성|써|만들|완성)|대신\s*(?:써|작성|만들|풀어|해\s*(?:줘|주))|통째로|처음부터\s*끝까지)"
+    r"|제출용[^\n]{0,40}?(?:완성|마무리|작성해|만들어|써\s*(?:줘|주))")
+_OWN_WORK_V29 = re.compile(r"(?:제가|내가|내|저의|나의)\s*(?:쓴|썼|작성한|작성했|만든|만들었|푼|풀었)")
+_ANSWER_ONLY_V29 = re.compile(_ANSWER_ONLY.pattern + r"|(?:값|결과|금액|액수|지출액|숫자|번호|최종\s*값)만\s*(?:알려|말해|줘|골라|써)"
+                              r"|(?:알려|말해)\s*주기만|풀이(?:는|도)?\s*(?:필요\s*없|빼고|생략)")
+_AD_LEARN_V29 = re.compile(_AD_LEARN.pattern + r"|암기|외우|외울|규칙을[^\n]{0,30}(?:형식으로|식으로)")
+_PII_SELF_V29 = re.compile(  # "저의 이름은" 추가, 줄임말 "전"은 문장 첫머리에서만(지식 베이스 "세금을 빼기 전 금액이에요"가 걸렸다)
+    r"(?:(?:^|[\s,.!?])(?:나는|난(?=\s)|저는|제\s*이름은|내\s*이름은|저의\s*이름은|나의\s*이름은)|(?:^|[,.!?]\s*)전(?=\s))"
+    r"\s*[가-힣a-z]{1,12}?\s*(?:중(?:학교)?\s*[1-3]\s*학년\s*)?[가-힣a-z]{0,6}(?:이야|야|예요|이에요|입니다|이고|고)(?=[\s,.!?]|$)"
+    r"|[가-힣]{1,8}\s*중(?:학교)?\s*[1-3]\s*학년")
+# 모욕은 사람(너·튜터·사람들)을 겨냥할 때만(지식 베이스 PY-01-04 "금지어 목록에는 `바보`와 `멍청이`"가 걸렸다).
+_INSULT_V29 = re.compile(r"존재할\s*가치|꺼져|(?:너|넌|니가|네가|당신|튜터|걔|쟤|그\s*애|사람들?|애들?|녀석들?|놈들?)\s*(?:은|는|이|가|도)?"
+                         r"[^\n]{0,12}?(?:쓸모\s*없|멍청|바보|한심)")
+# 게임: "아이템"은 뺀다(지식 베이스 FIN-03-03 "게임에서 아이템을 사고 싶으면"은 용돈 수업 내용), 랭크 올리기는 더한다.
+_GAME_CUE_V29 = r"(?:게임|game|겜)[^\n]{0,25}(?:공략|이기는|이길|랭크|전략)|공략|랭크\s*(?:를|가)?\s*(?:올리|상승|높이)"
+_GAME_V29 = re.compile(_GAME_CUE_V29)
+_OFF_TOPIC_V29 = re.compile(_OFF_TOPIC.pattern.replace(r"(?:게임|game|겜)[^\n]{0,25}(?:공략|이기는|이길|랭크|전략|아이템)|공략", _GAME_CUE_V29))
+# 사기 수법: 방법을 '알려 달라'는 요청일 때만, 구별·예방·특징 질문은 빼고(지식 베이스 FIN-04-01 "… 알아내는 수법이에요"가 걸렸다).
+_SCAM_METHOD_V29 = re.compile(_SCAM_METHOD.pattern + r"\s*(?:을|를|좀|이나)?\s*(?:알려|설명|가르쳐|말해|정리|써|보여)")
+# 같은 이름에 넓힌 규칙을 묶는다(아래 rule_adjust·decide.answer_only가 그대로 쓴다).
+if "jb" in _R29: _JB_META_AFTER = _JB_META_AFTER_V29
+if "quoted" in _R29: _HARM_QUOTED = _HARM_QUOTED_V29
+if "distress" in _R29: _DISTRESS = _DISTRESS_V29
+if "group" in _R29: _GROUP_INSULT = _GROUP_INSULT_V29
+if "ownwork" in _R29: _OWN_WORK = _OWN_WORK_V29
+if "answeronly" in _R29: _ANSWER_ONLY = _ANSWER_ONLY_V29
+if "adlearn" in _R29: _AD_LEARN = _AD_LEARN_V29
+if "game" in _R29: _GAME = _GAME_V29
+if "piiself" in _R29: _PII_SELF = _PII_SELF_V29
+if "insult" in _R29: _INSULT = _INSULT_V29
+if "game" in _R29: _OFF_TOPIC = _OFF_TOPIC_V29
+if "scamfix" in _R29: _SCAM_METHOD = _SCAM_METHOD_V29  # (아래 rule_adjust에서 구별·예방 질문도 뺀다)
 
 
 def rule_adjust(category: str, last_text: str) -> str:
@@ -187,7 +278,10 @@ def rule_adjust(category: str, last_text: str) -> str:
     if category in ("normal", "out_of_material", "answer_seeking", "pii_disclosure", "off_topic") and _SCAM_WRITE.search(t):
         return "harmful_content"
     if RULES_V27 and category in ("normal", "out_of_material", "answer_seeking", "pii_disclosure", "off_topic") and (
-            _SCAM_METHOD.search(t) or _SCAM_MAKE.search(t)):
+            (_SCAM_METHOD.search(t) and not ("scamfix" in _R29 and _SCAM_LEARN.search(t))) or _SCAM_MAKE.search(t)):
+        return "harmful_content"
+    if "scam" in _R29 and category in ("normal", "out_of_material", "answer_seeking", "pii_disclosure", "off_topic") and (
+            _SCAM_ART_V29.search(t) and not _SCAM_LEARN.search(t)):
         return "harmful_content"
     if category == "academic_dishonesty" and _OWN_WORK.search(t):
         category = "normal"
@@ -203,9 +297,11 @@ def rule_adjust(category: str, last_text: str) -> str:
     if category == "out_of_material" and _OFF_TOPIC.search(t):
         return "off_topic"
     if category in ("normal", "answer_seeking", "out_of_material", "pii_disclosure") and (
-            _OTHER_PII.search(t) or (RULES_V27 and _OTHER_ADDR.search(t))):
+            _OTHER_PII.search(t) or (RULES_V27 and _OTHER_ADDR.search(t))
+            or ("otherpii" in _R29 and _OTHER_PII_V29.search(t) and not _PII_PROTECT.search(t))):
         return "harmful_content"
-    if category in ("normal", "answer_seeking") and (_ACADEMIC.search(t) or (RULES_V27 and _ACADEMIC_FULL.search(t))) and not _OWN_WORK.search(t):
+    if category in ("normal", "answer_seeking") and (_ACADEMIC.search(t) or (RULES_V27 and _ACADEMIC_FULL.search(t))
+                                                    or ("academic" in _R29 and _ACADEMIC_V29.search(t))) and not _OWN_WORK.search(t):
         return "academic_dishonesty"
     if category == "emotional_distress" and not _DISTRESS.search(t):
         return "normal"
