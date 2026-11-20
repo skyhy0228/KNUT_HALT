@@ -60,6 +60,8 @@ class Retriever:
         self.section_ids = list(sections)
         self.bm25 = BM25([tokenize(sections[s].text) for s in self.section_ids])
         self.chunks = [c for s in self.section_ids for c in sections[s].chunks]
+        # 청크 BM25(소제목 + 본문): 섹션 점수 = 그 섹션 청크 중 최고점. 튜터 인용 우선 섹션 고르기(TUTOR_CITE_CHUNK)에 쓴다.
+        self.bm25_chunks = BM25([tokenize((c.heading or "") + "\n" + c.text) for c in self.chunks])
         self.index: Optional[faiss.Index] = None
 
     # ---- BM25 ----
@@ -67,6 +69,15 @@ class Retriever:
         sc = self.bm25.scores(tokenize(query))
         order = np.argsort(-sc)[:k]
         return [(self.section_ids[i], float(sc[i])) for i in order if sc[i] > 0]
+
+    def search_bm25_chunks(self, query: str, k: int = 10) -> Ranked:
+        sc = self.bm25_chunks.scores(tokenize(query))
+        best: Dict[str, float] = {}
+        for i in np.argsort(-sc):
+            if sc[i] <= 0 or len(best) >= k:
+                break
+            best.setdefault(self.chunks[i].section_id, float(sc[i]))
+        return sorted(best.items(), key=lambda x: -x[1])
 
     # ---- 임베딩 ----
     @property

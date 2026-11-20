@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 
 from .examples import format_tutor_examples
 from .llm import remaining
+from .retrieval import rrf
 from .policy import (CATEGORY_AFTER_DECISION, CATEGORY_GUIDE, CITING_ACTIONS, CLASSIFY_FEATURES, DECISION_GUIDE,
                      FEATURE_GUIDE, FEATURES_JSON, PROBLEM_TYPES, TEMPLATES, action_for, coerce_category,
                      features_to_category, harmful_type_for, is_low_signal, refusal_template, rule_adjust,
@@ -398,14 +399,32 @@ TUTOR_SEEK_FROM = os.environ.get("TUTOR_SEEK_FROM", "union")
 # 근거(2026-11-20, 공개 세트 영어 튜터 6문항 × 5회, 로컬 판정 2회): 문항 점수 합이 v18 대비 +0.38~+0.45.
 #   번역 + BM25만은 -0.03(번역문이 매번 달라 같은 문항의 정답 섹션이 2~15위로 흔들림), 번역 없이 원문 임베딩 하이브리드는 -0.30.
 #   그래서 번역에 실패하면 v18과 같은 검색(원문 BM25)으로 돌아간다. 코드가 든 영어 질문은 코드 낱말로 이미 잘 찾아 제외한다.
-# 번역 지시에는 KB 고유명사 힌트를 넣지 않는다(일반 번역). 5.5초 안에 못 받거나 남은 시간이 15초 미만이면 번역하지 않는다.
+# 번역 지시에는 KB 고유명사 힌트를 넣지 않는다(일반 번역). 7.5초 안에 못 받거나 남은 시간이 15초 미만이면 번역하지 않는다.
+# (v20: 제한 6→8초. v19 실채점 3회에서 번역 42회 중 7회가 5.5초 제한에 걸렸다. 성공한 번역은 중앙 3.6~4.5초.)
 # 번역 호출은 동시 상한 대기열을 건너뛴다(채점 때는 대기열이 차서 짧은 호출도 제한 시간을 넘기기 쉽다). 영어 질문에만 1회.
 TUTOR_ENG_TRANSLATE = os.environ.get("TUTOR_ENG_TRANSLATE", "1") == "1"
 # 영어 질문의 검색 방식: bm25 | hybrid(BM25 + 임베딩 RRF) | dense. 임베딩 색인이 없으면 Retriever.search가 BM25로 돌아간다.
 TUTOR_ENG_MODE = os.environ.get("TUTOR_ENG_MODE", "hybrid")
-ENG_RATIO_MIN, ENG_MIN_LETTERS, ENG_TRANSLATE_TIMEOUT_S = 0.9, 8, 6.0
+ENG_RATIO_MIN, ENG_MIN_LETTERS, ENG_TRANSLATE_TIMEOUT_S = 0.9, 8, 8.0
+
+# v20: 인용 우선 섹션(TUTOR_CITE_CHUNK = 0 | cite | front). 섹션 BM25와 청크 BM25(섹션 점수 = 청크 최고점)의 순위를 RRF로 합쳐
+# 검색 상위 3 안에서 1위를 고른다. cite = 인용·근거 문장 우선순위만 바꾼다([자료] 순서 그대로).
+# front = [자료]에서도 맨 앞에 둔다('검색 1위' 표시가 붙어 답변도 그 섹션을 기준으로 쓴다). BM25 검색(한국어 질문)에만 쓴다.
+# 근거(2026-11-20, 공개 튜터 중 근거 있는 한국어 115문항, API 없음): 1위 적중 105 → 107(고침 2, 깨짐 0), 1위가 바뀌는 문항 5/194.
+# 기각: 청크 BM25만(고침 3, 깨짐 4), 섹션+청크+임베딩 RRF(깨짐 8), 제목·소제목 BM25 추가(깨짐 11), 상위 3 전체를 RRF로 다시 뽑기(프롬프트 76문항 변경).
+TUTOR_CITE_CHUNK = os.environ.get("TUTOR_CITE_CHUNK", "front")
 _TRANSLATE_PROMPT = ("학습자가 영어로 쓴 질문을 한국어로 번역한다. 뜻을 바꾸거나 덧붙이지 않는다. 코드·변수명·파일 이름은 그대로 둔다. "
                      "이름·상품명 같은 고유명사는 한국어로 자연스럽게 옮긴다. JSON 객체 하나로만 답한다: {\"ko\": \"번역문\"}")
+
+
+def _cite_first(state: AppState, query: str, candidates: List[str]) -> List[str]:
+    if len(candidates) < 2:
+        return candidates
+    R = state.retriever
+    for sid, _ in rrf([R.search_bm25(query, 20), R.search_bm25_chunks(query, 20)]):
+        if sid in candidates:
+            return [sid] + [c for c in candidates if c != sid]
+    return candidates
 
 
 def _is_english(text: str) -> bool:
@@ -478,13 +497,18 @@ async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline
         qvec = await state.llm.embed_query(build_dense_query(rmsgs), deadline)
     ranked = state.retriever.search(build_query(rmsgs), qvec, k=TOP_K, mode=mode)
     candidates = [sid for sid, _ in ranked]
+    ctx = candidates  # [자료]에 넣는 순서
+    if TUTOR_CITE_CHUNK in ("cite", "front") and mode == "bm25":
+        candidates = _cite_first(state, build_query(rmsgs), candidates)  # 인용·근거 문장 우선순위
+        if TUTOR_CITE_CHUNK == "front":
+            ctx = candidates
     if remaining(deadline) < 3:
         if cls_task:
             cls_task.cancel()
         return rule_only_tutor(state, messages, candidates)
 
     examples = state.examples.search(messages, state.settings.fewshot_k, dedupe=160)
-    context = _context(state, candidates)
+    context = _context(state, ctx)
     prompt = [{"role": "system", "content": ANSWER_PROMPT if TUTOR_ROUTE else SYSTEM_PROMPT},
               {"role": "system", "content": "[자료]\n" + context}]
     if examples:
