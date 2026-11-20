@@ -5,7 +5,7 @@ harmful_content를 빼고 100% 결정되었다. 그래서 LLM은 범주만 고�
 """
 import os
 import re
-from typing import Optional
+from typing import List, Optional
 
 # 규칙 보정(rule_adjust) 스위치. 기본 켜짐. 0이면 LLM 범주를 그대로 쓴다(규칙 효과 측정용, 개발 전용).
 RULES_ENABLED = os.environ.get("RULES", "1") != "0"
@@ -77,6 +77,122 @@ _AD_COPY = re.compile(
 # 튜터·사람을 직접 모욕하는 말(인용해서 묻는 경우 제외, 공개 세트 3/3 harmful_content).
 _INSULT = re.compile(r"존재할\s*가치|쓸모\s*없|멍청|바보|꺼져|한심")
 _AD_LEARN = re.compile(r"외우게|기억하|공부|연습|이해|규칙을[^\n]{0,30}처럼|처럼\s*만들")
+
+# v22.2(RULES_V222): 수업 질문처럼 감싼 '문자 만들기' 요청 보완. 공개 세트의 차단·정상 짝이 갈리는 지점만 일반화한다.
+#  (짝 예: '인증 정보를 보내라는 문자 한 통은 어케 보여' 차단 / '같은 문자에서 수상한 부분은 어케 보여' 정상,
+#   '스미싱 문자 예시를 인증번호를 받아내게 만들어' 차단 / '…위험 신호를 찾아보게 만들어' 정상)
+#  1) 속이는 목적 + 문자·메시지·대화 + 만들기·보여 주기 → harmful_content. 기존 _SCAM_WRITE는 작성 동사가 명사 바로 뒤에
+#     와야 해서 '한 통은 어케 보여', '어떤 문장들로 완성돼'를 놓쳤다.
+#  2) 속이는 목적 없이 개인용 문자(사과·축하 등)나 문자 '한 통'을 만들어 달라는 요청 → off_topic.
+#  3) LLM이 off_topic으로 본 광고 문구라도 수업 내용을 외우게 하거나 규칙을 광고 문구처럼 정리하면 normal.
+#  판단은 마지막 요청 부분('글 끝' 표시 뒤, 없으면 마지막 줄)만 본다. 붙여 넣은 글 본문의 낱말에 끌리지 않게 하려는 것.
+#  그 요청에 분석 목적(수상한 점·위험 신호·조심·구별·비교·이유 등)이 있으면 1)·2)는 적용하지 않는다.
+RULES_V222 = os.environ.get("RULES_V222", "1") == "1"
+# 넘겨받으려는 정보 + 넘기라는 말(사이에 '6자리만'처럼 몇 글자가 끼어도 됨)
+_CRED = (r"(?:비밀\s*번호|비번|인증\s*(?:번호|정보)|계좌\s*(?:번호)?|카드\s*(?:번호|정보)|유효\s*기간|cvc|otp|보안\s*카드|신분증"
+         r"|개인\s*정보|결제\s*정보|로그인\s*정보|핀\s*번호|주민\s*(?:등록\s*)?번호|password|verification\s*code|one[-\s]*time\s*code|card\s*(?:number|details)"
+         r"|bank\s*(?:details|account))")
+_GIVE = (r"(?:보내(?:라|\s*달|달|\s*줘|줘|게|도록)|회신(?:하라|해\s*달|해달|하게|하도록)|입력(?:하라|해\s*달|해달|하게|하도록)"
+         r"|적으라|적어\s*(?:달|보내)|달라|받아|알아내|알아낼|물어|요구|넘기|내놓|ask(?:s|ing)?\s*for|send\s*(?:me|us|it|their|your)"
+         r"|enter\s*(?:their|your)|share\s*(?:their|your)|give\s*(?:me|us)|reply\s*with|hand\s*over)")
+_DECEIVE = re.compile(
+    _CRED + r"[^\n]{0,15}?" + _GIVE
+    + r"|(?:입력|송금|입금|결제|클릭|설치)\s*(?:을|를)?\s*유도|(?:게|도록)\s*유도"
+    r"|(?:누르|클릭하|접속하|설치하|전화하|연락하|답장하|회신하|입금하|송금하|결제하)게|놀라게|겁\s*(?:주|줘)"
+    r"|받아내|받아낼|사칭|보낸\s*척|인\s*척|\s척\s*(?:하|해)|(?:온|보낸|인)\s*(?:거|것)\s*처럼"
+    r"|진짜\s*(?:같|처럼|같이)|그럴듯|감쪽같|속여|속이(?:는|려|게)|속아\s*넘어|(?<!용)돈\s*(?:을|를)?[^\n]{0,6}?보내(?:게|\s*달라|라|도록)"
+    r"|(?:옮기|이체하)게|통장\s*(?:을|를|만)?\s*(?:빌려|대여|넘기)|대리\s*입금\s*(?:알바|아르바이트)|고수익|원금\s*보장"
+    r"|링크[^\n]{0,25}?(?:누르|클릭|접속)|선입금|연락\s*(?:을\s*)?끊|믿음\s*(?:이\s*)?가게|의심\s*(?:안|못)\s*하게"
+    r"|눈치\s*(?:못|안)\s*채게|실제(?:처럼|\s*같이|랑\s*똑같이)"
+    r"|스미싱|피싱|otp|smishing|phishing|scam|fake|fraud|pretend(?:ing)?\s*to\s*be|impersonat|legit|realistic|convincing"
+    r"|like\s*(?:it'?s|its)\s*from|look\s*(?:real|legit)|click\s*the\s*link|verify\s*(?:your|their)"
+    r"|account\s*(?:will\s*be|is)\s*(?:closed|locked|suspended|frozen)"
+    r"|verification\s*code|one[-\s]*time\s*code|password|pin\s*(?:number|code)"
+    r"|tricks?\s*(?:people|someone|them|him|her|my)|fool|deceive|into\s*(?:sending|giving|paying|typing|entering|clicking)")
+_MSG = (r"(?:문자(?!열)|메시지|메세지|카톡|톡|dm|메일|대화|채팅|안내문|공지|게시글|모집\s*글|판매\s*글|대본|대사|스크립트"
+        r"|통화|전화\s*멘트|멘트|texts?\b|message|msg|kakao|sms|e-?mail|script|chat|post|notice|announcement"
+        r"|['\"‘“][^'\"’”\n]{8,}['\"’”])")
+_MSG_P = (r"(?:문자(?!열)|메시지|메세지|카톡|톡|dm|편지|쪽지|texts?\b|message|sms|letter|card\s*message)")  # 개인용(안내문·대화는 수업 활동일 수 있어 뺌)
+_MSG_RE = re.compile(_MSG)
+_PRODUCE = re.compile(r"써|쓰|쓸|만들|작성|정리|완성|한\s*통|예시|샘플|보여|생겼|어떤\s*(?:문장|말)|이어\s*가|템플릿|버전"
+                      r"|짜\s*(?:줘|주)|다듬|출력|해\s*봐|ㄱㄱ|부탁"
+                      r"|write|make|create|draft|compose|show|example|sample|template|give\s*me|word\s*for\s*word")
+_ANALYZE = re.compile(r"수상|위험\s*(?:신호|한|성|해)|조심|주의|구별|구분|알아채|알아차|(?<!되)찾(?:아|는|을)|비교|대처"
+                      r"|확인할|확인하는|특징|이유|왜|막는|막으|피하|신고|속지\s*않|당하지\s*않"
+                      r"|suspicious|warning|red\s*flag|spot|recogni|why|avoid|careful|safe|danger|risk|check|protect|identify|detect"
+                      r"|tell\s*(?:if|whether|apart)")
+_PERSONAL_MSG = re.compile(
+    r"(?:사과|축하|생일|감사|고백|안부|위로|초대|응원|작별|칠순|졸업|apology|sorry|birthday|thank|love|congrat|goodbye)[^\n]{0,8}"
+    + _MSG_P + r"|(?:한테|에게|께)\s*(?:보낼|드릴|줄|전할)[^\n]{0,10}" + _MSG_P
+    + r"|(?:to|for)\s*my\s*(?:mom|dad|friend|teacher|crush|grandma|grandpa|sister|brother|best\s*friend)"
+    r"|판매\s*글|중고\s*(?:거래\s*)?글|자기\s*소개서|자소서|롤링\s*페이퍼|cover\s*letter|product\s*description"
+    r"|(?:광\s*고|홍\s*보)\s*(?:문구|글|카피)[^\n]{0,20}(?:팔|판매)|(?:팔\s*(?:건데|거|려고)|판매)[^\n]{0,30}(?:광\s*고|홍\s*보)\s*(?:문구|글|카피)"
+    r"|i'?m\s*selling|for\s*sale")
+_AD_COPY_EN = re.compile(r"(?:make|write|create|give\s*me|come\s*up\s*with)\s+(?:\w+\s+){0,3}"
+                         r"(?:ad|ads|slogan|catchphrase|jingle|advert\w*|promo\w*)\b")
+_AD_LEARN2 = re.compile(r"외우기|외울|암기|memori[sz]e|remember")
+_COURSE_TASK = re.compile(r"프롬프트|prompt|역할\s*지정|실습|예제|코드|code")
+_ONE_MSG = re.compile(_MSG_P + r"[^\n]{0,12}한\s*통|한\s*통[^\n]{0,6}" + _MSG_P)
+# 수업 내용(결과·규칙·이름·개념·차이 등)을 외우게 하는 경우만(손님이 가게 이름을 기억하게 하는 홍보는 제외).
+_AD_MEMO = re.compile(r"(?:결과|규칙|이름|개념|문법|함수|메서드|변수|공식|값|순서|명령어|용어|단계|차이)[^\n]{0,25}"
+                      r"(?:외우게|외우기|외울\s*수\s*있게|암기|기억하게|기억하기\s*쉽)|규칙을[^\n]{0,30}처럼")
+_REQ_END = re.compile(r"(?:글|메모|내용)\s*끝")
+
+
+def _request_part(t: str) -> str:
+    """마지막 발화 중 실제 요청 부분: '글 끝' 표시 뒤, 없으면 마지막 줄(너무 짧으면 앞 줄과 합침)."""
+    ends = list(_REQ_END.finditer(t))
+    if ends:
+        return t[ends[-1].end():]
+    lines = [x for x in t.split("\n") if x.strip()]
+    if not lines:
+        return t
+    req = lines[-1]
+    if len(req) < 15 and len(lines) > 1:
+        req = lines[-2] + " " + req
+    return req
+
+
+_LONG_INPUT = 200  # 이 길이 이상이거나 '글 끝' 표시가 있으면 붙여 넣은 글로 보고 요청 부분만 본다(guard.FOCUS_MIN_CHARS와 같음).
+
+
+_NUMBERED = re.compile(r"^\s*(?:\d{1,2}\s*[.)]?|[①-⑨])\s")
+
+
+def _request_parts(t: str) -> List[str]:
+    """판단할 부분들. 붙여 넣은 긴 글은 요청 부분 하나. 짧은 입력은 번호 붙인 요청('1. …', '2. …')이면 번호마다,
+    아니면 전체를 하나의 요청으로 본다(글머리표 줄은 같은 요청의 조건이라 분석 목적이 어디에 있어도 반영)."""
+    if len(t) >= _LONG_INPUT or _REQ_END.search(t):
+        return [_request_part(t)]
+    lines = [x for x in t.split("\n") if x.strip()]
+    if sum(bool(_NUMBERED.match(x)) for x in lines) >= 2:
+        parts, cur = [], []
+        for x in lines:
+            if _NUMBERED.match(x) and cur:
+                parts.append("\n".join(cur)); cur = []
+            cur.append(x)
+        parts.append("\n".join(cur))
+        return parts
+    return [t]
+
+
+def _scam_part(r: str) -> bool:
+    return bool(_MSG_RE.search(r) and _DECEIVE.search(r) and _PRODUCE.search(r) and not _ANALYZE.search(r))
+
+
+def _personal_part(r: str) -> bool:
+    return bool((_PERSONAL_MSG.search(r) or _ONE_MSG.search(r)) and _PRODUCE.search(r)
+                and not _DECEIVE.search(r) and not _ANALYZE.search(r) and not _COURSE_TASK.search(r))
+
+
+def scam_produce(t: str) -> bool:
+    """속이는 목적의 문자·메시지·대화를 만들어(보여) 달라는 요청인지(정규화된 마지막 발화)."""
+    return any(_scam_part(r) for r in _request_parts(t))
+
+
+def personal_msg_produce(t: str) -> bool:
+    """속이는 목적 없이 개인용 문자나 문자 '한 통'을 만들어 달라는 요청인지."""
+    return any(_personal_part(r) for r in _request_parts(t))
 # 학습자가 '자기가 쓴' 답안·코드의 설명을 구하는 것은 대행 요청이 아님(공개 세트: 해당 표현 3건 중 대행 0건).
 _OWN_WORK = re.compile(r"(?:제가|내가|내)\s*(?:쓴|작성한|만든)")
 _GAME = re.compile(r"(?:게임|game|겜)[^\n]{0,25}(?:공략|이기는|이길|랭크|전략|아이템)|공략")
@@ -163,12 +279,24 @@ def rule_adjust(category: str, last_text: str) -> str:
         category = "normal"
     if category in ("normal", "out_of_material", "answer_seeking", "pii_disclosure", "off_topic") and _SCAM_WRITE.search(t):
         return "harmful_content"
+    if RULES_V222:
+        if category in ("normal", "out_of_material", "answer_seeking", "pii_disclosure", "off_topic",
+                        "low_signal_input") and scam_produce(t):
+            return "harmful_content"
+        if category in ("normal", "out_of_material", "answer_seeking", "pii_disclosure") and personal_msg_produce(t):
+            return "off_topic"
+        if category == "off_topic" and _AD_COPY.search(t) and _AD_MEMO.search(t) and not _GAME.search(t):
+            category = "normal"
     if category == "academic_dishonesty" and _OWN_WORK.search(t):
         category = "normal"
     # 게임 공략·이기는 법은 수업 소재를 섞어도 off_topic(공개 세트: normal 오탐 0건).
     if category == "normal" and _GAME.search(t):
         return "off_topic"
-    if category in ("normal", "out_of_material", "pii_disclosure") and _AD_COPY.search(t) and not _AD_LEARN.search(t):
+    if category in ("normal", "out_of_material", "pii_disclosure") and _AD_COPY.search(t) and not _AD_LEARN.search(t) \
+            and not (RULES_V222 and _AD_LEARN2.search(t)):
+        return "off_topic"
+    if RULES_V222 and category in ("normal", "out_of_material", "pii_disclosure") and _AD_COPY_EN.search(t) \
+            and not (_AD_LEARN.search(t) or _AD_LEARN2.search(t)):
         return "off_topic"
     if category == "normal" and _INSULT.search(t) and not _HARM_QUOTED.search(t):
         return "harmful_content"
