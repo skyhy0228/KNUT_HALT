@@ -152,9 +152,16 @@ def _verified_quotes(state: AppState, obj: Dict[str, Any], candidates: List[str]
 # 답변에 그 문장 내용이 이미 60% 이상 있거나, 표 행이거나, 160자를 넘으면 붙이지 않는다.
 TUTOR_QUOTE_IN_ANSWER = os.environ.get("TUTOR_QUOTE_IN_ANSWER", "1") == "1"
 TUTOR_DEBUG = os.environ.get("TUTOR_DEBUG", "0") == "1"  # 개발용: 바뀌기 전 답변 등을 _debug에 남김(채점 서버에서는 끔)
+# v18: 근거 문장을 '이미 들어 있다'고 보고 건너뛰는 기준(문자 3-gram 비율)과 덧붙이는 최대 개수.
+# 최대 개수가 2 이상이면, 이미 들어 있는 문장은 건너뛰고 다음 검증된 문장을 본다. v17은 (0.6, 1).
+# v18 기본 (0.6, 2): D1 저장 출력 재생 + 바뀐 응답만 로컬 판정 2회 짝 비교(2026-11-20) — 바뀐 응답 89/600,
+# 튜터 회당 +0.06/+0.06/+0.12점, 좋아짐 5 / 나빠짐 2(잡음 범위의 약한 이득, action·인용 변화 없음).
+TUTOR_QUOTE_COVER = float(os.environ.get("TUTOR_QUOTE_COVER", "0.6"))
+TUTOR_QUOTE_MAX = int(os.environ.get("TUTOR_QUOTE_MAX", "2"))
 
 
 def _with_quote(answer: str, quotes, citations: List[str]) -> str:
+    out, added = answer, 0
     for sid, text in quotes:
         if sid not in citations:
             continue
@@ -162,10 +169,15 @@ def _with_quote(answer: str, quotes, citations: List[str]) -> str:
         if not text or "|" in text or len(text) > 160:
             continue
         q = _ngrams(text)
-        if q and len(q & _ngrams(answer)) / len(q) >= 0.6:
-            return answer  # 이미 답변에 들어 있음
-        return f'{answer} 자료에는 "{text}"라고 나와 있어요.'
-    return answer
+        if q and len(q & _ngrams(out)) / len(q) >= TUTOR_QUOTE_COVER:
+            if TUTOR_QUOTE_MAX <= 1:
+                return out  # 이미 답변에 들어 있음(v17: 첫 문장만 본다)
+            continue
+        out = f'{out} 자료에는 "{text}"라고 나와 있어요.' if added == 0 else f'{out} 또 "{text}"라고도 나와 있어요.'
+        added += 1
+        if added >= TUTOR_QUOTE_MAX:
+            break
+    return out
 
 
 # TUTOR_SEEK_QUOTE=1: '정답만 알려 줘'(answer_seeking → scaffold) 답변에 그 문제의 근거 규칙을 자료 원문으로 넣는다.
@@ -377,6 +389,9 @@ _ROUTE_BENIGN = ("normal", "pii_disclosure", "answer_seeking", "out_of_material"
 # 로컬(action·인용) 회차마다 +0.50, 정상 질문을 abstain으로 바꾼 경우 0/600, 공격 놓침·과잉 거절·인용 변화 없음.
 # 두 폴드 모두에서 고른 유일한 규칙이지만 바뀐 문항이 2개뿐이라 근거는 약하다. 0이면 v15와 같다.
 TUTOR_OOM_UNION = os.environ.get("TUTOR_OOM_UNION", "1") == "1"
+# v18 실험: '정답만 요구'(answer_seeking)를 어느 호출에서 받을지. union(v17: 어느 쪽이든) | answer(답변 호출만) | both(둘 다).
+# 정상 질문을 scaffold로 바꾸면 action과 정답 사실을 함께 잃고, 정답만 요구를 놓치면 action만 잃는다(비대칭).
+TUTOR_SEEK_FROM = os.environ.get("TUTOR_SEEK_FROM", "union")
 
 
 async def _route(deadline: float, base: str, cls_task: "asyncio.Future") -> str:
@@ -392,8 +407,12 @@ async def _route(deadline: float, base: str, cls_task: "asyncio.Future") -> str:
         return cls
     if base in BLOCK_CATEGORIES or base == "emotional_distress":
         return base
-    if "answer_seeking" in (cls, base):
+    s_cls, s_base = cls == "answer_seeking", base == "answer_seeking"
+    if (TUTOR_SEEK_FROM == "union" and (s_cls or s_base)) or (TUTOR_SEEK_FROM == "answer" and s_base) \
+            or (TUTOR_SEEK_FROM == "both" and s_cls and s_base):
         return "answer_seeking"
+    if s_base:
+        base = "normal"  # 정답만 요구로 인정하지 않으면 정상 질문으로 답한다
     if cls == "pii_disclosure" and base == "normal":
         return "pii_disclosure"
     if TUTOR_OOM_UNION and cls == "out_of_material" and base in ("normal", "pii_disclosure"):
