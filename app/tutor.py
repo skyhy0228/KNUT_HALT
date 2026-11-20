@@ -13,6 +13,7 @@ import re
 from collections import Counter
 from typing import Any, Dict, List, Optional
 
+from .emotion_gate import EMO_WORDS
 from .examples import format_tutor_examples
 from .llm import remaining
 from .policy import (CATEGORY_AFTER_DECISION, CATEGORY_GUIDE, CITING_ACTIONS, CLASSIFY_FEATURES, DECISION_GUIDE,
@@ -391,6 +392,40 @@ async def _route(deadline: float, base: str, cls_task: "asyncio.Future") -> str:
     return base
 
 
+# TUTOR_EMO_GATE=1(기본 켬, v16.5): 정서 표현 구절 관문(app/emotion_gate.py). 마지막 발화에 감정 낱말이 있으면
+# 감정 낱말과 앞뒤 3어절만 임베딩해 예시 풀로 만든 '정서 위기 / 가벼운 감정' 중심점과 비교한다(LLM 호출과 병렬, 임베딩 1회).
+#   - 내리기(기본): 라우팅 결과가 emotional_distress인데 점수<=0이면 답변 쪽 범주로 되돌린다(과제에 대한 가벼운 걱정).
+#     전체 예시 풀 leave-one-out에서 정서 위기 구절 최저 점수 +0.050 > 0이라 진짜 정서 위기는 내리지 않는다.
+#   - 올리기(TUTOR_EMO_GATE_UP=1, 기본 끔): 라우팅 결과가 정상 쪽(normal·pii·정답만 요구·자료에 없음)인데 점수가 올리기 문턱
+#     (예시 풀 leave-one-out의 정서 위기 최솟값과 그 밖 최댓값의 중간, 겹치면 0)을 넘으면 emotional_distress로 올린다.
+#     끄는 이유: 전체 예시 풀에서 두 쪽이 겹치고(0.050 vs 0.053 → 문턱 0), 교차 검증 2회에서 이득 0·LLM이 놓친 유해 표현
+#     ('~가 싫어', 점수 +0.05)을 정서 위기로 올린 경우 1건.
+#   - 막기 범주(공격)는 바꾸지 않는다. 가드에는 적용하지 않는다(가드는 정상 문항의 범주를 채점하지 않아 내리기 이득이 없다).
+# 11-20 측정(공개 세트, 그룹 분할로 다른 폴드 풀에서 만든 중심점): 구절 분류 26/27(문장 전체 임베딩 18/27).
+# 저장해 둔 입력 판정 결과에 내리기 적용(짝 비교): 400문항×2회 오탐 5 → 0, 정서 관련 26문항×5회 오탐 8 → 0, 정서 위기 맞힘 변화 없음.
+# 튜터 교차 검증 2회(판정 포함): 관문이 매긴 19문항 중 내리기 2건 모두 정답으로 고침, 진짜 정서 위기 내림 0. 0이면 v16.1과 같다.
+TUTOR_EMO_GATE = os.environ.get("TUTOR_EMO_GATE", "1") == "1"
+TUTOR_EMO_GATE_UP = os.environ.get("TUTOR_EMO_GATE_UP", "0") == "1"
+
+
+async def _emo_gate(deadline: float, category: str, answer_side: str, task: "asyncio.Future", gate_up: float = 0.0):
+    """(최종 범주, 관문 점수 또는 None). 내리기 문턱 0, 올리기 문턱 gate_up(예시 풀에서 계산, EmotionGate 참고)."""
+    try:
+        score = await asyncio.wait_for(task, timeout=max(0.1, remaining(deadline) - 1.0))
+    except Exception:  # 시간 초과·임베딩 실패 → 관문 없이 그대로
+        task.cancel()
+        return category, None
+    if score is None:
+        return category, None
+    if category == "emotional_distress" and score <= 0:
+        log.warning("tutor_emo_gate_down")  # 개수만 남긴다(내용 없음)
+        return (answer_side if answer_side != "emotional_distress" else "normal"), score
+    if TUTOR_EMO_GATE_UP and category in _ROUTE_BENIGN and score > gate_up:
+        log.warning("tutor_emo_gate_up")
+        return "emotional_distress", score
+    return category, score
+
+
 async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline: float) -> Dict[str, Any]:
     if not messages:
         return {"answer": TEMPLATES["clarify"], "action": "clarify", "citations": []}
@@ -418,10 +453,16 @@ async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline
 
     cls_task = (asyncio.ensure_future(classify_input(state, messages, deadline))
                 if (TUTOR_VOTE or TUTOR_ROUTE) else None)
+    last_text = messages[-1]["content"]
+    emo_task = (asyncio.ensure_future(state.emo_gate.score(state.llm, last_text, deadline))
+                if (TUTOR_EMO_GATE and TUTOR_ROUTE and state.emo_gate is not None and EMO_WORDS.search(last_text))
+                else None)
     obj = await state.llm.chat_json(prompt, deadline)
     if obj is None:
         if cls_task:
             cls_task.cancel()
+        if emo_task:
+            emo_task.cancel()
         return rule_only_tutor(state, messages, candidates)
 
     llm_category = coerce_category(obj.get("category")) or "normal"
@@ -435,10 +476,14 @@ async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline
     elif TUTOR_PROBLEMS:
         base = _problem_category(obj, base)
     category = rule_adjust(base, messages[-1]["content"])
+    answer_side = category
     if cls_task and TUTOR_ROUTE:
         category = await _route(deadline, category, cls_task)
     elif cls_task:
         category = await _vote(state, messages, deadline, category, cls_task)
+    emo_score = None
+    if emo_task is not None:
+        category, emo_score = await _emo_gate(deadline, category, answer_side, emo_task, state.emo_gate.up_threshold)
     answer = obj.get("answer") if isinstance(obj.get("answer"), str) else ""
     answer = answer.strip()
     if category == "out_of_material" and llm_category != "out_of_material":
@@ -502,5 +547,6 @@ async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline
     result = {"answer": answer, "action": action, "citations": citations}
     if TUTOR_DEBUG:
         result["_debug"] = {"answer_before": before, "quote_added": answer != before,
-                            "seek_off": seek_off, "seek_on": seek_on}
+                            "seek_off": seek_off, "seek_on": seek_on,
+                            "emo_score": emo_score, "answer_side": answer_side, "category": category}
     return result

@@ -4,10 +4,13 @@
 임베딩 API가 실패해도 서버는 BM25만으로 뜬다.
 """
 import logging
+import os
 import time
 from dataclasses import dataclass
+from typing import Optional
 
 from .config import Settings
+from .emotion_gate import EmotionGate
 from .examples import ExamplePool
 from .kb import load_kb
 from .llm import LLM
@@ -22,6 +25,7 @@ class AppState:
     retriever: Retriever
     llm: LLM
     examples: ExamplePool
+    emo_gate: Optional[EmotionGate] = None  # 튜터 정서 표현 구절 관문(app/emotion_gate.py)
 
 
 async def build_state(settings: Settings) -> AppState:
@@ -48,5 +52,8 @@ async def build_state(settings: Settings) -> AppState:
             log.info("kb_embeddings_ready source=%s shape=%s", source, tuple(emb.shape))
 
     examples = ExamplePool(settings.fewshot_files)
+    emo_gate = None
+    if os.environ.get("TUTOR_EMO_GATE", "1") == "1":
+        emo_gate = await EmotionGate.build(llm, examples)
     log.info("startup_ready dense=%s elapsed_ms=%d", retriever.dense_ready, (time.perf_counter() - t0) * 1000)
-    return AppState(settings, retriever, llm, examples)
+    return AppState(settings, retriever, llm, examples, emo_gate)
