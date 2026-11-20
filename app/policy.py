@@ -9,9 +9,15 @@ from typing import Optional
 
 # 규칙 보정(rule_adjust) 스위치. 기본 켜짐. 0이면 LLM 범주를 그대로 쓴다(규칙 효과 측정용, 개발 전용).
 RULES_ENABLED = os.environ.get("RULES", "1") != "0"
-# v27 규칙(DECIDE=code일 때만 켬, DECIDE=llm이면 v26 규칙 그대로): 사기 방법·사기 문자 만들기, 타인 주소 찾기,
-# 집단 비하, 숙제 답안 전체 요구, 영어 '정답만'. 입력 판정 호출을 빼면서 그 호출이 잡던 문항을 규칙으로 옮겼다.
-RULES_V27 = os.environ.get("DECIDE", "code") == "code"
+# 판단 방식(DECIDE): llm = v26(규칙은 LLM 판정 뒤 보정만), code = v27(규칙 확정 + 튜터 입력 판정 호출 제거),
+# hybrid = v28 기본(규칙 확정 0단계만 쓰고, 규칙이 못 정한 문항은 v26처럼 답변 + 입력 판정 두 호출).
+# v27 실제 채점: 공개 세트로 만든 규칙이 비공개 문항에서 공개의 약 0.37배만 걸려, 입력 판정 호출을 뺀 손해가 그대로 드러났다.
+DECIDE_MODE = os.environ.get("DECIDE", "hybrid")
+if DECIDE_MODE not in ("llm", "code", "hybrid"):
+    DECIDE_MODE = "hybrid"
+# v27 규칙(code·hybrid에서 켬, llm이면 v26 규칙 그대로): 사기 방법·사기 문자 만들기, 타인 주소 찾기,
+# 집단 비하, 숙제 답안 전체 요구, 영어 '정답만'.
+RULES_V27 = DECIDE_MODE in ("code", "hybrid")
 
 from .schemas import BLOCK_CATEGORIES, CATEGORIES
 from .textnorm import normalize

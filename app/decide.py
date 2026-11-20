@@ -1,4 +1,11 @@
-"""v27 코드 판단(DECIDE=code, 기본): 판단은 코드가 먼저, LLM은 규칙이 정하지 못한 문항의 재료만 낸다.
+"""코드 판단 단계. DECIDE=hybrid(v28, 기본) | code(v27) | llm(v26).
+
+hybrid(v28): 아래 0단계만 쓴다. 규칙이 못 정한 문항은 v26과 같다(튜터 답변 + 입력 판정 두 호출, 가드 3표).
+    v27(code)은 공개 세트에서는 좋았지만 실제 채점 튜터가 80.85(같은 오후 v26 85.54)였다 — 규칙이 비공개 문항에서
+    공개의 약 0.37배만 걸렸고(서버 로그 응답 시간), 규칙을 끈 재생에서 답변 호출만으로는 위험 5범주 행동 정답이
+    16/159(입력 판정을 합친 v26은 134/159)였다. 가드는 규칙 0단계 + 원래 3표라 손해가 없었다(실제 91.04).
+
+code(v27): 판단은 코드가 먼저, LLM은 규칙이 정하지 못한 문항의 재료만 낸다.
 
 0단계(코드, LLM 없음) — 키워드 규칙(policy.rule_category)이 범주를 정하면 그대로 확정한다.
     공개 세트 400문항: 규칙이 범주를 정한 139문항 모두 맞음, 정상 질문 212개 오탐 0, 정상이 아닌 188문항 중 74%를 규칙이 정한다
@@ -17,14 +24,17 @@ DECIDE=llm이면 v26과 같다.
 import os
 from typing import Optional
 
-from .policy import _ANSWER_ONLY, _ANSWER_ONLY_EN, rule_category
+from .policy import DECIDE_MODE, _ANSWER_ONLY, _ANSWER_ONLY_EN, rule_category
 from .textnorm import normalize
 
-DECIDE_CODE = os.environ.get("DECIDE", "code") == "code"
+RULE_FIRST = DECIDE_MODE in ("code", "hybrid")  # 0단계(규칙 확정, LLM 없음)
+DECIDE_CODE = DECIDE_MODE == "code"  # v27만: 튜터 입력 판정 호출 제거 + 2단계 병합(정답만 요구 제한)
 
 # 규칙이 정하면 LLM 없이 고정 문구로 답하는 튜터 범주(응대 방식이 refuse·redirect·escalate·clarify·대행 scaffold).
+# STAGE0_SKIP(쉼표 목록)에 적은 범주는 0단계에서 빼고 LLM 경로로 보낸다(측정용).
+_STAGE0_SKIP = {c.strip() for c in os.environ.get("STAGE0_SKIP", "").split(",") if c.strip()}
 TEMPLATE_CATEGORIES = frozenset({"jailbreak_injection", "harmful_content", "off_topic", "emotional_distress",
-                                 "low_signal_input", "academic_dishonesty"})
+                                 "low_signal_input", "academic_dishonesty"}) - _STAGE0_SKIP
 # 범주 우선순위(policy.CATEGORY_GUIDE의 [우선순위]와 같다): 앞일수록 강하다.
 PRIORITY = ("emotional_distress", "harmful_content", "jailbreak_injection", "academic_dishonesty", "off_topic",
             "answer_seeking", "out_of_material", "pii_disclosure", "low_signal_input", "normal")
@@ -32,7 +42,7 @@ PRIORITY = ("emotional_distress", "harmful_content", "jailbreak_injection", "aca
 
 def rule_decision(last_text: str) -> Optional[str]:
     """규칙만으로 정한 범주(정상이면 None). DECIDE=llm이면 늘 None."""
-    if not DECIDE_CODE:
+    if not RULE_FIRST:
         return None
     c = rule_category(last_text)
     return None if c == "normal" else c
