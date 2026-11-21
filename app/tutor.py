@@ -8,6 +8,7 @@
 """
 import asyncio
 import logging
+import math
 import os
 import re
 from collections import Counter
@@ -224,6 +225,62 @@ def _with_quote(answer: str, quotes, citations: List[str]) -> str:
         if added >= TUTOR_QUOTE_MAX:
             break
     return out
+
+
+# TUTOR_ADD_BEST=1 (v33.5, v19에서 옮김): 정상 질문 답변에, 인용한 섹션에서 '질문과 가장 비슷한 문장' 하나를 자료 원문 그대로
+# 덧붙인다("자료에는 "…"라고도 나와 있어요."). 위의 근거 문장 덧붙이기(_with_quote)는 LLM이 고른 문장이라 LLM이 질문을
+# 다르게 읽으면 같이 빗나간다. 이것은 LLM과 따로, 질문과 글자가 가장 많이 겹치는 문장을 고른다.
+# 비슷함 = 문자 3-gram 겹침을 KB 전체 문장 기준 IDF로 가중(여러 섹션에 반복되는 과정·동아리 이름의 영향을 줄임).
+# 질문 문장(?로 끝남)·표 행·연결 문장·코드 블록은 후보에서 빼고, 답변에 그 내용이 이미 60% 이상 있으면 붙이지 않는다.
+# 덧붙이는 것은 인용 섹션의 원문뿐이라 근거 충실을 해치지 않는다. 끄려면 TUTOR_ADD_BEST=0.
+TUTOR_ADD_BEST = os.environ.get("TUTOR_ADD_BEST", "1") == "1"
+_BEST_SPLIT = re.compile(r"(?<=[.!?。])\s+|\n+")
+_BEST_BAD = re.compile(r"[?？]\s*$|^(?:이제|그럼|먼저|다음)\b|,\S+,|^\S+,\S+")
+_BEST_INDEX: Optional[tuple] = None  # ({섹션 ID: [(문장, 3-gram 집합, 가중치 합의 제곱근)]}, {3-gram: IDF})
+
+
+def _best_section_sentences(text: str) -> List[str]:
+    text = re.sub(r"```.*?```", " ", text, flags=re.S)
+    out = []
+    for s in _BEST_SPLIT.split(text):
+        s = re.sub(r"\s+", " ", s).strip().lstrip("-*• ").strip().replace("**", "")
+        if not (10 <= len(s) <= 160) or s.startswith("#") or "|" in s or (s.startswith(("Q.", "A.")) and len(s) < 12):
+            continue
+        out.append(s)
+    return out
+
+
+def _best_index(state: AppState) -> tuple:
+    """KB 섹션별 후보 문장과 3-gram IDF(KB 전체 문장 기준). 첫 호출 때 한 번 만든다(KB는 실행 중 바뀌지 않음)."""
+    global _BEST_INDEX
+    if _BEST_INDEX is None:
+        per_sec = {sid: _best_section_sentences(sec.text) for sid, sec in state.retriever.sections.items()}
+        grams = {s: _ngrams(s) for ss in per_sec.values() for s in ss}
+        df = Counter(g for ss in per_sec.values() for s in ss for g in grams[s])
+        n = sum(len(ss) for ss in per_sec.values())
+        idf = {g: math.log(1 + n / c) for g, c in df.items()}
+        index = {}
+        for sid, ss in per_sec.items():
+            index[sid] = [(s, grams[s], math.sqrt(sum(idf[g] for g in grams[s])))
+                          for s in ss if grams[s] and not _BEST_BAD.search(s)]
+        _BEST_INDEX = (index, idf)
+    return _BEST_INDEX
+
+
+def _with_best_sentence(state: AppState, answer: str, question: str, sid: str) -> str:
+    index, idf = _best_index(state)
+    q = _ngrams(question)
+    best, best_score = None, 0.0
+    for s, grams, norm in index.get(sid, ()):
+        score = sum(idf[g] for g in grams & q) / norm
+        if score > best_score:
+            best, best_score = s, score
+    if best is None:
+        return answer
+    grams = _ngrams(best)
+    if len(grams & _ngrams(answer)) / len(grams) >= 0.6:
+        return answer  # 이미 답변에 들어 있음
+    return f'{answer} 자료에는 "{best}"라고도 나와 있어요.'
 
 
 # TUTOR_SEEK_QUOTE=1: '정답만 알려 줘'(answer_seeking → scaffold) 답변에 그 문제의 근거 규칙을 자료 원문으로 넣는다.
@@ -769,6 +826,9 @@ async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline
             cur = dict(ranked).get(citations[0], 0.0)
             if ranked and ranked[0][0] != citations[0] and ranked[0][1] > cur + KBPREP_B5_MARGIN:
                 citations = [ranked[0][0]] + [c for c in citations[1:] if c != ranked[0][0]]
+    if (TUTOR_ADD_BEST and action == "answer" and category in ("normal", "pii_disclosure") and citations
+            and citations[0] in state.retriever.sections):
+        answer = _with_best_sentence(state, answer, messages[-1]["content"], citations[0])
     result = {"answer": answer, "action": action, "citations": citations}
     if TUTOR_DEBUG:
         result["_debug"] = {"answer_before": before, "quote_added": answer != before,
