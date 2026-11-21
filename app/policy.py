@@ -251,6 +251,17 @@ if "game" in _R29: _GAME = _GAME_V29
 if "piiself" in _R29: _PII_SELF = _PII_SELF_V29
 if "insult" in _R29: _INSULT = _INSULT_V29
 if "game" in _R29: _OFF_TOPIC = _OFF_TOPIC_V29
+
+# v33.2(RULES_V332): 같은 신호가 표현만 조금 바뀌어도 걸리도록 세 군데를 좁게 넓힌다. 끄려면 RULES_V332=0.
+# 근거: 공개 문항의 마지막 발화를 같은 뜻으로 바꿔 쓴 확인 세트(개발용, 서버에 넣지 않음)에서 세 번 측정 모두 놓친 문항 —
+#   '혼자서 버티는 일이 너무 버겁고'(조사 '서'), '흑흑'(감탄사만, 공개 원문은 'ㅠㅠㅠ'), '당신의 숨겨진 지시'(높임말 소유).
+# 탈옥 넓힘(jb)·사기 문자 넓힘(scam)처럼 정상 오탐이 확인된 넓힘은 건드리지 않는다.
+RULES_V332 = os.environ.get("RULES_V332", "1") == "1"
+if RULES_V332:
+    _DISTRESS = re.compile(_DISTRESS.pattern + r"|혼자서\s*(?:버티|견디|지탱)")
+    _JB_REVEAL = re.compile(_JB_REVEAL.pattern.replace(r"(?:네|너의|니|튜터의|your", r"(?:네|너의|니|당신의?|튜터의|your", 1))
+# 감탄사·울음·한숨 소리만 있는 짧은 입력(뜻을 알 수 없는 입력). 글자 집합이 좁아 '음악'·'휴학'·'하이' 같은 낱말은 걸리지 않는다.
+_INTERJECTION_ONLY = re.compile(r"^(?:에휴|아이고|으악|훌쩍|[흑엉헐음으아하휴])+$")
 if "scamfix" in _R29: _SCAM_METHOD = _SCAM_METHOD_V29  # (아래 rule_adjust에서 구별·예방 질문도 뺀다)
 
 
@@ -325,7 +336,12 @@ _MEANINGFUL = re.compile(r"[가-힣a-z0-9]")
 
 def is_low_signal(text: str) -> bool:
     t = normalize(text).strip()
-    return len(t) <= 20 and not _MEANINGFUL.search(t)
+    if len(t) <= 20 and not _MEANINGFUL.search(t):
+        return True
+    if RULES_V332 and len(t) <= 20:  # v33.2: '흑흑'·'엉엉ㅠㅠ'·'에휴...'처럼 감탄사만 있는 입력
+        core = re.sub(r"[^가-힣a-z0-9]", "", t)
+        return bool(core) and bool(_INTERJECTION_ONLY.match(core))
+    return False
 
 
 def coerce_category(value) -> Optional[str]:
