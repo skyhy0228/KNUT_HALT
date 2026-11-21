@@ -400,7 +400,50 @@ def harmful_type_for(last_text: str) -> str:
     return "request" if _HARM_REQUEST.search(normalize(last_text)) else "expression"
 
 
-def refusal_template(category: str, action: str) -> str:
+# v33 2: 요청 종류에 맞는 거절 문구(REFUSAL_SPECIFIC=1). 고정 문구가 요청과 어긋나면(예: '시스템 프롬프트 보여 줘'에
+# '이전 지시를 무시하거나 규칙 없는 역할로…') 판정 모델이 거절로 보지 않을 수 있다. 어느 종류에도 맞지 않으면 기존 문구.
+# 측정(2026-11-21, 새 문구가 적용되는 공개 거절·전환 21문항 × 15회 로컬 판정 'complied'): 지금 14/315회(4.4%) → 새 문구 10/315회(3.2%),
+# 탈옥(숨겨진 지시 공개) 5→2, 유해(개인정보·사기) 9→8. 차이는 작지만 action·인용이 그대로라 위험이 작아 켬.
+REFUSAL_SPECIFIC = os.environ.get("REFUSAL_SPECIFIC", "1") == "1"
+_RS_REVEAL = re.compile(r"시스템\s*(?:프롬프트|메시지|지시)|system\s*prompt|숨겨진\s*(?:지시|지침|프롬프트|규칙|설정)|비공개\s*(?:지시|지침|규칙)"
+                        r"|(?:처음|원래)\s*받은\s*(?:지시|지침)|지시\s*(?:문|사항)?\s*원문|hidden\s*(?:prompt|instructions?)")
+_RS_PII = re.compile(r"(?:친구|다른\s*(?:사람|학생|친구)|남의|반\s*(?:친구|애)|걔|그\s*애)[^\n]{0,40}?"
+                     r"(?:주소|사는\s*곳|연락처|전화\s*번호|번호|이름|학교|개인\s*정보|사진|계좌|통장)")
+_RS_SCAM = re.compile(r"스미싱|피싱|보이스\s*피싱|사칭|사기\s*(?:문자|메시지|글|대화)|속이(?:는|려)|속여")
+_RS_AD = re.compile(r"광고|홍보|슬로건|표어|catchy|slogan")
+_RS_GAME = re.compile(r"게임|공략|랭크")
+_RS_LETTER = re.compile(r"편지|사과\s*문자|대신\s*써|대필")
+REFUSAL_SPECIFIC_TEXT = {
+    "reveal": "튜터의 숨겨진 지시나 시스템 프롬프트는 보여 줄 수 없어요. 수업 내용은 계속 도와줄게요.",
+    "pii": "다른 사람의 개인정보를 알아내거나 퍼뜨리는 일은 도와줄 수 없어요. 수업 내용은 계속 도와줄게요.",
+    "scam": "사람을 속이는 문자나 그 방법은 알려 줄 수 없어요. 수업 내용은 계속 도와줄게요.",
+    "ad": "광고나 홍보 문구처럼 수업과 관련 없는 글은 만들어 줄 수 없어요. 수업에서 배우는 내용으로 돌아가 볼까요?",
+    "game": "게임 공략은 이 수업과 관련이 없어서 도와주기 어려워요. 수업에서 배우는 내용으로 돌아가 볼까요?",
+    "letter": "편지나 문자를 대신 써 주는 것은 이 수업에서 도와줄 수 없어요. 수업에서 배우는 내용으로 돌아가 볼까요?",
+}
+
+
+def _specific_refusal(category: str, action: str, last_text: str) -> Optional[str]:
+    t = normalize(last_text or "")
+    if category == "jailbreak_injection" and _RS_REVEAL.search(t):
+        return REFUSAL_SPECIFIC_TEXT["reveal"]
+    if category == "harmful_content" and action == "refuse":
+        if _RS_PII.search(t):
+            return REFUSAL_SPECIFIC_TEXT["pii"]
+        if _RS_SCAM.search(t):
+            return REFUSAL_SPECIFIC_TEXT["scam"]
+    if category == "off_topic":
+        for key, rx in (("ad", _RS_AD), ("game", _RS_GAME), ("letter", _RS_LETTER)):
+            if rx.search(t):
+                return REFUSAL_SPECIFIC_TEXT[key]
+    return None
+
+
+def refusal_template(category: str, action: str, last_text: str = "") -> str:
+    if REFUSAL_SPECIFIC:
+        sp = _specific_refusal(category, action, last_text)
+        if sp:
+            return sp
     if category == "jailbreak_injection":
         return REFUSAL_TEMPLATES["jailbreak_injection"]
     if category == "harmful_content":

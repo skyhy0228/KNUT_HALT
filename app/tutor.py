@@ -26,7 +26,7 @@ from .policy import (CATEGORY_AFTER_DECISION, CATEGORY_GUIDE, CITING_ACTIONS, CL
 from .guard import classify_input
 from .schemas import BLOCK_CATEGORIES, tutor_fallback
 from .state import AppState
-from .textnorm import build_dense_query, build_query, normalize
+from .textnorm import build_dense_query, build_query, normalize, tokenize
 
 TOP_K = 3
 
@@ -147,9 +147,49 @@ def _verified_quotes(state: AppState, obj: Dict[str, Any], candidates: List[str]
         order = list(dict.fromkeys(top + ([claimed] if claimed in candidates else []) + list(candidates)))
         for sid in order:
             if quote_supported(text, state.retriever.sections[sid].text):
-                out.append((sid, text.strip()))
+                orig = _original_sentence(state.retriever.sections[sid].text, text) if QUOTE_ORIGINAL else None
+                out.append((sid, (orig or text).strip()))
                 break
     return out
+
+
+# v33 3: 검증을 통과한 근거 문장을 LLM이 옮겨 적은 글 대신, 맞춰 본 자료의 원래 문장으로 쓴다(QUOTE_ORIGINAL=1).
+# 지금 검증은 글자 3-gram 80% 이상 겹침이라, 조사·낱말을 조금 바꿔 옮긴 문장(예: '신고하기'→'알리기')도 통과해 답에 붙는다.
+# 원래 문장 = 그 섹션의 문장(또는 이어진 두 문장) 중 옮긴 문장을 80% 이상 담으면서 글자 겹침 F1이 가장 큰 것.
+# 측정(2026-11-21, 저장 출력 600건 재생 + 바뀐 105건만 로컬 판정 2회 짝 비교): 좋아짐 8 · 나빠짐 1, 근거 충실 합 98.0→100.5,
+# 정답 사실 합 90.5→93.5, 튜터 회당 +0.25점, action·인용 변화 0 → 켬.
+QUOTE_ORIGINAL = os.environ.get("QUOTE_ORIGINAL", "1") == "1"
+# 문장 끝(. ! ?) 뒤에 닫는 따옴표가 와도 그 뒤에서 나눈다. 줄바꿈도 문장 경계.
+_SENT_SPLIT = re.compile(r"(?<=[.!?])[\"”’']?\s+|\n+")
+_MD_MARK = re.compile(r"\*\*|__")  # 굵은 글씨만 뗀다(코드 표시 `…`는 그대로)
+
+
+def _clean_sentence(x: str) -> str:
+    x = _MD_MARK.sub("", x).strip()
+    x = re.sub(r"^(?:[-*>•]\s*|\d+[.)]\s*)+", "", x).strip()  # 목록 기호·번호
+    return x.strip("\"“”‘’' ").strip()
+
+
+def _original_sentence(section_text: str, quote: str) -> Optional[str]:
+    sents = [_clean_sentence(x) for x in _SENT_SPLIT.split(section_text)]
+    sents = [x for x in sents if x and not x.startswith("#") and "|" not in x]
+    qn = _ngrams(quote)
+    if not qn:
+        return None
+
+    def pick(cands):
+        best, best_f = None, 0.0
+        for c in cands:
+            cn = _ngrams(c)
+            inter = len(qn & cn)
+            if not cn or inter / len(qn) < QUOTE_COVERAGE:
+                continue
+            f = 2 * inter / (len(qn) + len(cn))
+            if f > best_f:
+                best, best_f = c, f
+        return best
+    # 한 문장으로 옮긴 문장을 담을 수 있으면 한 문장, 아니면 이어진 두 문장
+    return pick(sents) or pick([a + " " + b for a, b in zip(sents, sents[1:])])
 
 
 # TUTOR_QUOTE_IN_ANSWER=1: 정상 질문 답변에, 인용한 섹션에서 나온 검증된 근거 문장을 그대로 덧붙인다
@@ -339,7 +379,7 @@ def rule_only_tutor(state: AppState, messages: List[Dict[str, str]], candidates:
     action = action_for(category, harmful_type)
     citations = candidates[:1] if action in CITING_ACTIONS else []
     if action in ("refuse", "redirect"):
-        answer = refusal_template(category, action)
+        answer = refusal_template(category, action, messages[-1]["content"])
     elif category == "academic_dishonesty":
         answer = TEMPLATES["academic_scaffold"]
     elif action in TEMPLATES:  # scaffold·escalate·clarify·abstain
@@ -474,8 +514,44 @@ def _cite_first(state: AppState, query: str, candidates: List[str], last: str = 
         lists += [x for x in (R.prep.search_code(query), R.prep.search_anchored(query)) if x]
     for sid, _ in rrf(lists):
         if sid in candidates:
-            return [sid] + [c for c in candidates if c != sid]
+            out = [sid] + [c for c in candidates if c != sid]
+            return _residual_rerank(R, query, out) if CITE_RESIDUAL else out
     return candidates
+
+
+# v33 1: 인용 다시 매기기(CITE_RESIDUAL=1). 상위 후보 섹션들이 모두 가진 질문 토큰(같은 상품·예제 이름처럼 섹션을 가르지
+# 못하는 말)을 빼고 나머지 질문 토큰으로 BM25를 다시 매긴다. 새 1위가 지금 1위보다 CITE_RESIDUAL_MARGIN배 이상 높을 때만
+# 1위를 바꾼다. 후보(LLM이 본 [자료]) 안에서만 순서를 바꾸므로 프롬프트는 그대로다. 섹션 ID는 코드에 적지 않는다.
+# 측정(재생 600건, 배수 1.0·1.2·1.5·2.0·3.0): 인용 좋아짐 0 · 나빠짐 0 → 끔. 남은 인용 오류는 '학생이 말하는 그 예제·퀴즈가
+# 어느 섹션에 있나'의 문제라 낱말 빈도로 가를 수 없었다(근거 문장이 확인된 섹션으로 바꾸는 방식도 고침 5 · 깨짐 31).
+CITE_RESIDUAL = os.environ.get("CITE_RESIDUAL", "0") == "1"
+CITE_RESIDUAL_MARGIN = float(os.environ.get("CITE_RESIDUAL_MARGIN", "1.5"))
+
+
+def _section_tokens(R, sid: str) -> set:
+    cache = R.__dict__.setdefault("_v33_tok_cache", {})
+    if sid not in cache:
+        if R.prep is not None:
+            cache[sid] = set(R.prep._toks(R.prep.section_index_text[sid]))
+        else:
+            cache[sid] = set(tokenize(R.sections[sid].text))
+    return cache[sid]
+
+
+def _residual_rerank(R, query: str, ordered: List[str]) -> List[str]:
+    if len(ordered) < 2:
+        return ordered
+    shared = set.intersection(*[_section_tokens(R, s) for s in ordered])
+    resid = [tok for tok in R._qtoks(query) if tok not in shared]
+    if not resid:
+        return ordered
+    sc = R.bm25.scores(resid)
+    idx = {s: i for i, s in enumerate(R.section_ids)}
+    top = ordered[0]
+    best = max(ordered, key=lambda s: sc[idx[s]])
+    if best != top and sc[idx[best]] > 0 and sc[idx[best]] >= CITE_RESIDUAL_MARGIN * max(float(sc[idx[top]]), 1e-9):
+        return [best] + [s for s in ordered if s != best]
+    return ordered
 
 
 def _is_english(text: str) -> bool:
@@ -663,7 +739,7 @@ async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline
         answer = _abstain_tail(answer, _verified_quotes(state, obj, candidates), citations)
 
     if action in ("refuse", "redirect"):
-        answer = refusal_template(category, action)
+        answer = refusal_template(category, action, messages[-1]["content"])
     elif action in ("escalate", "clarify"):
         answer = _safe_refusal(action, answer, max_len=400)
     elif category == "academic_dishonesty":
