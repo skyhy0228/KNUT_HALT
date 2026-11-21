@@ -511,11 +511,12 @@ def _retrieve(state: AppState, messages: List[Dict[str, str]], candidate: Option
 # v22: 긴 마지막 발화의 끝부분 요청 짚어 주기. 긴 글을 붙여 넣고 끝에 진짜 요청(사칭 문자 작성, 사과 문자 예시)을 두면
 # LLM이 앞부분만 보고 정상으로 판정했다(공개 가드 2문항, 2회 × 3표 중 11/12표 정상). 마지막 발화가 FOCUS_MIN_CHARS 이상이면
 # '글 끝' 표시 뒤(없으면 끝 FOCUS_TAIL_CHARS자)를 [판정할 대화] 뒤에 따로 보여 준다. 판정 기준은 그대로.
-# GUARD_FOCUS_TAIL = 가드(기본 켬), TUTOR_CLS_FOCUS_TAIL = 튜터 입력 판정(classify_input, 기본 끔 — 시험하지 않음, 튜터는 v21과 같음).
+# GUARD_FOCUS_TAIL = 가드(기본 켬), TUTOR_CLS_FOCUS_TAIL = 튜터 입력 판정(classify_input).
+# v33.1: 튜터 입력 판정도 기본 켬(가드와 같은 프롬프트를 쓰므로 같은 표시를 준다. 끄려면 TUTOR_CLS_FOCUS_TAIL=0).
 # 근거(2026-11-20, 공개 가드 중 메모가 붙는 긴 입력 17문항 × 3회, 나머지 183문항은 교차 검증 값): 가드 점수 끔 94.21 → 켬 94.84,
 # 긴 입력 문항 평균 86.84 → 93.54, e8fe6b75(사칭 문자 작성) 0/3 → 3/3, 새로 틀린 문항 0. 924712a7(사과 문자 예시)은 그대로 놓침.
 GUARD_FOCUS_TAIL = os.environ.get("GUARD_FOCUS_TAIL", "1") == "1"
-TUTOR_CLS_FOCUS_TAIL = os.environ.get("TUTOR_CLS_FOCUS_TAIL", "0") == "1"
+TUTOR_CLS_FOCUS_TAIL = os.environ.get("TUTOR_CLS_FOCUS_TAIL", "1") == "1"
 FOCUS_MIN_CHARS, FOCUS_TAIL_CHARS = 200, 120
 _PASTE_END = re.compile(r"(?:글|메모|내용)\s*끝")
 
