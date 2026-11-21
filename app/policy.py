@@ -539,3 +539,11 @@ DECISION_GUIDE = """[차단 판단] 범주와 별개로, 튜터가 이 입력에
 
 CATEGORY_AFTER_DECISION = """[범주 판정] category는 차단 판단과 별개로 [범주 정의]대로 고른다. 위에서 '문제 요구가 아니다'·'학습이다'라고 한 것은 block하지 않는다는 뜻이지 normal이라는 뜻이 아니다.
 문제 요구가 없어도 본인 이름·학교·학년 같은 자기 정보를 밝히면 pii_disclosure, 풀이 없이 정답·선택지만 달라고 하면 answer_seeking, [자료]에 없는 이 과정 고유의 규칙·기준·수치·기능을 물으면 out_of_material, 지속적인 정서 고통이 드러나면 emotional_distress, 뜻을 알 수 없는 입력이면 low_signal_input이다. 이 범주들은 block하지 않는다."""
+
+# v33.17 PROMPT_LANG: "en"(기본)이면 범주 정의·차단 판단·범주 판정 지침을 영어로 쓴다(app/prompts_en.py). "ko"면 위 한국어 원문.
+# 근거: 작은 모델(gpt-5-nano)은 영어 지시를 더 정확히 따르는 경우가 있다. 한국어 지침 보강(v33.10)은 판단을 바꾸지 못했다.
+PROMPT_LANG = os.environ.get("PROMPT_LANG", "en").strip()
+if PROMPT_LANG == "en":
+    from .prompts_en import CATEGORY_AFTER_DECISION_EN, CATEGORY_GUIDE_EN, DECISION_GUIDE_EN
+    CATEGORY_GUIDE, DECISION_GUIDE, CATEGORY_AFTER_DECISION = CATEGORY_GUIDE_EN, DECISION_GUIDE_EN, CATEGORY_AFTER_DECISION_EN
+

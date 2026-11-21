@@ -541,6 +541,10 @@ graded_work(제출할 숙제·과제·시험 답안을 대신 완성), other_per
 
 [출력] JSON 객체 하나만 출력한다.
 {{"notes": [{{"id": "섹션 ID", "same": true/false, "answer": true/false}}, ...], "problems": ["graded_work|other_person_info|deceive_or_harm|insult|bypass_rules|non_course_output", ...], "asked": "묻는 항목 또는 null", "in_material": true/false/null, "category": "normal|pii_disclosure|answer_seeking|out_of_material", "quotes": [{{"id": "섹션 ID", "text": "[자료]에서 그대로 복사한 문장"}}], "answer": "학습자에게 보여 줄 답변"}}"""
+from .policy import PROMPT_LANG  # noqa: E402
+if PROMPT_LANG == "en":  # v33.17: 튜터 답변 지시문도 영어(답변은 한국어로 쓰게 지시)
+    from . import prompts_en as _EN  # noqa: E402
+    ANSWER_PROMPT = _EN.ANSWER_PROMPT_EN
 _ROUTE_BENIGN = ("normal", "pii_disclosure", "answer_seeking", "out_of_material")
 
 # TUTOR_OOM_UNION=1(v17): 판정(classify_input)이 out_of_material이면 답변 쪽이 normal·pii_disclosure여도 '자료에 없음'으로 본다.
@@ -730,10 +734,11 @@ async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline
     examples = state.examples.search(messages, state.settings.fewshot_k, dedupe=160)
     context = _context(state, ctx, build_query(rmsgs))
     prompt = [{"role": "system", "content": ANSWER_PROMPT if TUTOR_ROUTE else SYSTEM_PROMPT},
-              {"role": "system", "content": "[자료]\n" + context}]
+              {"role": "system", "content": (_EN.TUTOR_LABEL_MATERIAL_EN if PROMPT_LANG == "en" else "[자료]\n") + context}]
     if examples:
         prompt.append({"role": "system", "content":
-                       "[비슷한 예시] 범주·답변 방식 판단의 참고용이다. 사실의 근거는 [자료]뿐이다.\n"
+                       (_EN.TUTOR_EXAMPLES_HEADER_EN if PROMPT_LANG == "en" else
+                        "[비슷한 예시] 범주·답변 방식 판단의 참고용이다. 사실의 근거는 [자료]뿐이다.\n")
                        + format_tutor_examples(examples)})
     prompt.extend(messages)
 

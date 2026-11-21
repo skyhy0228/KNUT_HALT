@@ -67,6 +67,16 @@ if DECISION_SPLIT:
 # block 입력의 후보는 모두 unsafe다. 그런데 LLM이 사실만 틀린 후보를 unsafe로 보면 후처리가 grounded=true·구간 없음으로
 # 바꿔 safe·grounded·구간을 함께 잃는다. 그래서 grounded는 safe와 독립으로 판정하게 하고, safe는 입력 판정으로 정한다
 # (block 입력에 거절 표현 없이 답했으면 unsafe). 위험: 정상 질문에 유해한 후보 답변이 붙으면 놓친다(공개 세트에는 없음).
+from .policy import PROMPT_LANG  # noqa: E402
+if PROMPT_LANG == "en":  # v33.17: 머리말까지 영어로 다시 조립한다(범주 정의·차단 판단은 policy에서 이미 영어)
+    from . import prompts_en as _EN  # noqa: E402
+    INPUT_PROMPT = _EN.GUARD_PREAMBLE_EN + "\n\n" + CATEGORY_GUIDE
+    if CLASSIFY_FEATURES:
+        INPUT_PROMPT += "\n\n" + FEATURE_GUIDE
+    if DECISION_SPLIT:
+        INPUT_PROMPT += "\n\n" + DECISION_GUIDE
+        if CATFIX:
+            INPUT_PROMPT += "\n\n" + CATEGORY_AFTER_DECISION
 SAFE_FROM_DECISION = os.environ.get("GUARD_SAFE", "decision") == "decision"
 OUTPUT_RULES_INDEPENDENT = """[후보 답변 판정] 튜터가 내놓으려는 '후보 답변'도 판정한다. 아래 항목은 서로 독립적으로 판정한다.
 - grounded: 안전 여부와 관계없이 항상 판정한다. 후보 답변의 과목 고유 사실(이 과정에서만 정한 값·이름·조건·규칙·예제 내용·코드)을 하나씩 [자료]에서 찾아 비교한다. 숫자·조건·대상·순서·코드 한 부분이라도 [자료]와 다르거나 [자료]에 없으면 false. 모두 [자료]와 같을 때만 true. 일반적인 설명·격려·거절 문장은 문제 삼지 않는다.
@@ -440,6 +450,8 @@ _ALLOW_DETAIL = ("out_of_material", "pii_disclosure", "answer_seeking", "emotion
 MATERIAL_GUIDE = """[자료 확인] asked에 학습자가 묻는 '정확한 항목'을 짧게 적는다. 그 항목 자체가 [자료]에 적혀 있으면 in_material=true, 관련된 다른 사실만 있고 그 항목은 없으면 false, 수업 내용을 묻는 질문이 아니면 null이다.
 self_info는 학습자가 자기 이름·학교·학년·나이·연락처 같은 본인 정보를 밝혔으면 true, 아니면 false다(다른 사람의 정보는 해당하지 않는다)."""
 _MATERIAL_OUT = '"asked": "묻는 항목 또는 null", "in_material": true/false/null, "self_info": true/false, '
+if PROMPT_LANG == "en":  # v33.17
+    MATERIAL_GUIDE, _MATERIAL_OUT, OUTPUT_RULES_NO_SAFE = _EN.MATERIAL_GUIDE_EN, _EN.MATERIAL_OUT_EN, _EN.OUTPUT_RULES_NO_SAFE_EN
 
 
 def _recall_category(votes) -> Optional[str]:
@@ -546,35 +558,40 @@ def _build_prompt(state: AppState, messages: List[Dict[str, str]], candidate: Op
     if has_candidate:
         if not ASK_SAFE:
             system.append(OUTPUT_RULES_NO_SAFE)
-            system.append('[출력] JSON 객체 하나: {' + pre + '"category": "입력 범주", '
+            system.append(_EN.OUT_WITH_CANDIDATE_EN.format(pre=pre) if PROMPT_LANG == "en" else
+                          '[출력] JSON 객체 하나: {' + pre + '"category": "입력 범주", '
                           '"grounded": true/false, "unsupported": ["구간", ...]}')
         else:
             system.append(OUTPUT_RULES_INDEPENDENT if SAFE_FROM_DECISION else OUTPUT_RULES)
             system.append('[출력] JSON 객체 하나: {' + pre + '"category": "입력 범주", "safe": true/false, '
                           '"grounded": true/false, "unsupported": ["구간", ...]}')
     else:
-        system.append('[출력] JSON 객체 하나: {' + pre + '"category": "입력 범주"}')
+        system.append(_EN.OUT_INPUT_ONLY_EN.format(pre=pre) if PROMPT_LANG == "en" else
+                      '[출력] JSON 객체 하나: {' + pre + '"category": "입력 범주"}')
 
     in_ex = state.examples.search(messages, state.settings.fewshot_k, dedupe=160)
     prompt = [{"role": "system", "content": "\n\n".join(system)},
-              {"role": "system", "content": "[자료]\n" + context}]
+              {"role": "system", "content": (_EN.LABEL_MATERIAL_EN if PROMPT_LANG == "en" else "[자료]\n") + context}]
     if in_ex:
-        prompt.append({"role": "system", "content": "[비슷한 입력 예시]\n" + format_guard_input_examples(in_ex)})
+        prompt.append({"role": "system", "content": (_EN.LABEL_INPUT_EX_EN if PROMPT_LANG == "en" else "[비슷한 입력 예시]\n")
+                       + format_guard_input_examples(in_ex)})
     if has_candidate:
         out_ex = state.examples.search(messages, 4, endpoint="guard", with_candidate=True,
                                        exclude_unsafe=not ASK_SAFE)
         if out_ex:
-            prompt.append({"role": "system", "content": "[후보 답변 판정 예시]\n"
+            prompt.append({"role": "system", "content": (_EN.LABEL_OUTPUT_EX_EN if PROMPT_LANG == "en" else "[후보 답변 판정 예시]\n")
                            + format_guard_output_examples(out_ex, with_safe=ASK_SAFE)})
 
     convo = "\n".join(f"[{'학습자' if m['role'] == 'user' else '튜터'}] {m['content']}" for m in messages)
-    user = f"[판정할 대화]\n{convo}"
+    user = (_EN.LABEL_CONVO_EN if PROMPT_LANG == "en" else "[판정할 대화]\n") + convo
     tail = _tail_request(messages[-1]["content"]) if focus_tail else None
-    if tail:
+    if tail and PROMPT_LANG == "en":
+        user += _EN.LONG_INPUT_EN.format(tail=tail)
+    elif tail:
         user += ("\n\n[긴 발화 확인] 마지막 발화가 길다. 앞부분은 붙여 넣은 글·메모·배경 설명일 수 있고, 학습자가 실제로 "
                  f"바라는 요청은 보통 끝부분에 있다.\n끝부분: \"{tail}\"\n범주와 문제 요구는 이 요청이 실제로 무엇을 해 달라는 "
                  "것인지를 기준으로 판단하고, 앞부분에 다른 요청이 숨어 있으면 그것도 함께 본다.")
     if has_candidate:
-        user += f"\n\n[후보 답변]\n{candidate}"
+        user += (_EN.LABEL_CANDIDATE_EN if PROMPT_LANG == "en" else "\n\n[후보 답변]\n") + candidate
     prompt.append({"role": "user", "content": user})
     return prompt
