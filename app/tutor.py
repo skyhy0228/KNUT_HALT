@@ -417,6 +417,29 @@ def _safe_refusal(action: str, answer: str, max_len: int = 200) -> str:
     return answer
 
 
+# v33.16 TUTOR_FALLBACK_EXTRACT: LLM을 못 쓸 때(호출 실패·시간 초과·빈 답) 'answer'로 나가는 대체 답변을 고정 문구 대신
+# 인용 섹션에서 질문과 가장 비슷한 원문 한 문장으로 만든다(v33.5 덧붙이기와 같은 고르기). 고정 문구는 정답 사실을 0으로 만들지만,
+# 원문 문장은 인용 섹션 그대로라 근거 충실을 지키면서 정답 사실을 담을 수 있다. LLM이 정상일 때의 답변은 바뀌지 않는다.
+# 근거: 11-21 API 혼잡 때 우리 서버 LLM 시간 초과가 채점 회차당 수백~2천여 건(평소 0~5건). 끄려면 TUTOR_FALLBACK_EXTRACT=0.
+TUTOR_FALLBACK_EXTRACT = os.environ.get("TUTOR_FALLBACK_EXTRACT", "1") == "1"
+
+
+def _extractive_answer(state: AppState, question: str, sid: Optional[str]) -> Optional[str]:
+    if not (TUTOR_FALLBACK_EXTRACT and sid and sid in state.retriever.sections and question):
+        return None
+    try:
+        index, idf = _best_index(state)
+    except Exception:
+        return None
+    q = _ngrams(question)
+    best, best_score = None, 0.0
+    for s, grams, norm in index.get(sid, ()):
+        score = sum(idf[g] for g in grams & q) / norm
+        if score > best_score:
+            best, best_score = s, score
+    return f'자료에는 "{best}"라고 나와 있어요.' if best else None
+
+
 def rule_only_tutor(state: AppState, messages: List[Dict[str, str]], candidates: Optional[List[str]] = None) -> Dict[str, Any]:
     """LLM을 못 쓸 때(호출 실패·시간 부족·예외)의 응답. 규칙으로 범주를 정하고 고정 문구로 답한다.
 
@@ -441,8 +464,8 @@ def rule_only_tutor(state: AppState, messages: List[Dict[str, str]], candidates:
         answer = TEMPLATES["academic_scaffold"]
     elif action in TEMPLATES:  # scaffold·escalate·clarify·abstain
         answer = TEMPLATES[action]
-    else:  # answer: 실제 답은 못 만들므로 기존 대체 문구
-        answer = tutor_fallback()["answer"]
+    else:  # answer: LLM 답이 없으므로 인용 섹션의 원문 문장(v33.16), 없으면 기존 대체 문구
+        answer = _extractive_answer(state, last, citations[0] if citations else None) or tutor_fallback()["answer"]
     return {"answer": answer, "action": action, "citations": citations}
 
 
@@ -804,7 +827,9 @@ async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline
         if not answer or len(answer) > 250 or re.search(r"```|^\s*(?:[-*•]|\d+[.)])\s|\d\)\s", answer, re.M):
             answer = TEMPLATES["academic_scaffold"]
     elif not answer:
-        answer = TEMPLATES["abstain"] if action == "abstain" else tutor_fallback()["answer"]
+        answer = TEMPLATES["abstain"] if action == "abstain" else (
+            _extractive_answer(state, messages[-1]["content"], citations[0] if citations else None)
+            or tutor_fallback()["answer"])
     seek_off = answer
     if category == "answer_seeking" and action == "scaffold" and TUTOR_QUOTES:
         seek_on = _seek_scaffold(answer, _verified_quotes(state, obj, candidates), citations,
