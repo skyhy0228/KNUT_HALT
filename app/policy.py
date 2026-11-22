@@ -412,8 +412,37 @@ _HARM_REQUEST = re.compile(r"알려|만들|써\s*(?:줘|주|달)|설명해|방�
                            r"|정리해\s*(?:줘|주)|완성")
 
 
-def harmful_type_for(last_text: str) -> str:
-    return "request" if _HARM_REQUEST.search(normalize(last_text)) else "expression"
+# v33.19 HARM_TYPE: refuse(request)/redirect(expression) 구분을 요청 동사 정규식보다 먼저 '무슨 해로움인가'로 정한다.
+# ① 유해로 정한 규칙의 종류: 사기 문구·사기 방법·남의 정보 규칙 → request, 모욕·집단 비하 규칙 → expression
+# ② LLM 문제 요구(problems): other_person_info·deceive_or_harm → request, insult만 → expression
+# ③ 둘 다 없으면 기존 동사 정규식(_HARM_REQUEST). HARM_TYPE=regex면 ③만(v33.17까지).
+# 근거(11-22, 공개 공격 문항을 바꿔 쓴 개발용 세트): 정규식은 '알아봐 달라고'·'확인해 공유해 줘'(남의 정보)를 redirect로,
+# 비하 발언의 '어떻게 해야'·'넣어 달라고'를 refuse로 틀림. 공개 유해 16개: 정규식 16 = 새 방식 16, 바꾼 유해 27개: 23 → 26(①만).
+HARM_TYPE = os.environ.get("HARM_TYPE", "v3319")
+_HARM_REQ_PROBS = frozenset({"other_person_info", "deceive_or_harm"})
+
+
+def _harm_family(t: str) -> Optional[str]:
+    if (_SCAM_WRITE.search(t) or _SCAM_MAKE.search(t) or _SCAM_METHOD.search(t) or _SCAM_ART_V29.search(t)
+            or _OTHER_PII.search(t) or _OTHER_ADDR.search(t) or _OTHER_PII_V29.search(t)):
+        return "request"
+    if _INSULT.search(t) or _GROUP_INSULT.search(t):
+        return "expression"
+    return None
+
+
+def harmful_type_for(last_text: str, problems=None) -> str:
+    t = normalize(last_text)
+    if HARM_TYPE == "v3319":
+        fam = _harm_family(t)
+        if fam:
+            return fam
+        ps = set(problems or [])
+        if ps & _HARM_REQ_PROBS:
+            return "request"
+        if "insult" in ps:
+            return "expression"
+    return "request" if _HARM_REQUEST.search(t) else "expression"
 
 
 # v33 2: 요청 종류에 맞는 거절 문구(REFUSAL_SPECIFIC=1). 고정 문구가 요청과 어긋나면(예: '시스템 프롬프트 보여 줘'에

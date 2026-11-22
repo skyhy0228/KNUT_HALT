@@ -702,6 +702,8 @@ async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline
     mode = state.settings.retrieval_mode
     qvec = None
     cls_task = None
+    cls_info: Dict[str, Any] = {}  # v33.19: 입력 판정의 problems
+    ans_probs: List[str] = []
     rmsgs = messages  # 검색 질의용 대화(답변 프롬프트에는 원문 그대로)
     if (TUTOR_ENG_TRANSLATE or TUTOR_ENG_MODE != "bm25") and _is_english(messages[-1]["content"]):
         ko = ""
@@ -709,7 +711,7 @@ async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline
         aliases = prep0.alias_matches(messages[-1]["content"]) if prep0 is not None else []  # v26 C-8
         if TUTOR_ENG_TRANSLATE:
             if (TUTOR_VOTE or TUTOR_ROUTE) and not DECIDE_CODE:  # 번역을 기다리는 동안 입력 판정 호출을 먼저 시작
-                cls_task = asyncio.ensure_future(classify_input(state, messages, deadline))
+                cls_task = asyncio.ensure_future(classify_input(state, messages, deadline, cls_info))
             ko = await _translate(state, messages[-1]["content"], deadline, aliases)
             if ko:
                 rmsgs = messages[:-1] + [{"role": "user", "content": messages[-1]["content"] + "\n" + ko}]
@@ -743,7 +745,7 @@ async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline
     prompt.extend(messages)
 
     if cls_task is None and not DECIDE_CODE:  # v27: 코드 판단이면 입력 판정 호출을 부르지 않는다(요청당 LLM 2회 → 1회)
-        cls_task = (asyncio.ensure_future(classify_input(state, messages, deadline))
+        cls_task = (asyncio.ensure_future(classify_input(state, messages, deadline, cls_info))
                     if (TUTOR_VOTE or TUTOR_ROUTE) else None)
     obj = await state.llm.chat_json(prompt, deadline)
     if obj is None:
@@ -759,6 +761,7 @@ async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline
         probs = [p for p in obj.get("problems") or [] if isinstance(p, str) and p in PROBLEM_TYPES] \
             if isinstance(obj.get("problems"), list) else []
         base = PROBLEM_TYPES[probs[0]] if probs else base
+        ans_probs = probs
     elif TUTOR_PROBLEMS:
         base = _problem_category(obj, base)
     category = rule_adjust(base, messages[-1]["content"])
@@ -802,7 +805,8 @@ async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline
         category, answer = "out_of_material", TEMPLATES["abstain"]
     if OOM_CHECK and category in ("normal", "pii_disclosure") and obj.get("in_material") is False:
         category, answer = "out_of_material", TEMPLATES["abstain"]
-    harmful_type = harmful_type_for(messages[-1]["content"]) if category == "harmful_content" else None
+    harmful_type = (harmful_type_for(messages[-1]["content"], list(ans_probs) + list(cls_info.get("problems") or []))
+                    if category == "harmful_content" else None)  # v33.19: 규칙 종류 → LLM problems → 동사 정규식
     action = action_for(category, harmful_type)
 
     citations = candidates[:1] if action in CITING_ACTIONS else []
@@ -862,5 +866,7 @@ async def handle_tutor(state: AppState, messages: List[Dict[str, str]], deadline
     result = {"answer": answer, "action": action, "citations": citations}
     if TUTOR_DEBUG:
         result["_debug"] = {"answer_before": before, "quote_added": answer != before,
-                            "seek_off": seek_off, "seek_on": seek_on}
+                            "seek_off": seek_off, "seek_on": seek_on,
+                            "harm": {"category": category, "final": harmful_type,
+                                     "ans_probs": ans_probs, "cls_probs": cls_info.get("problems")}}
     return result

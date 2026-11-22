@@ -480,8 +480,10 @@ def _vote_input(votes):
     return category, decision, next(o for o, c in same if c == category)
 
 
-async def classify_input(state: AppState, messages: List[Dict[str, str]], deadline: float) -> Optional[str]:
-    """튜터 투표용: 가드와 같은 입력 판정(후보 답변 없이)을 하고 최종 범주를 돌려준다. 실패하면 None."""
+async def classify_input(state: AppState, messages: List[Dict[str, str]], deadline: float,
+                         info: Optional[Dict[str, Any]] = None) -> Optional[str]:
+    """튜터 투표용: 가드와 같은 입력 판정(후보 답변 없이)을 하고 최종 범주를 돌려준다. 실패하면 None.
+    info(dict)를 주면 LLM이 적은 문제 요구 목록을 info["problems"]에 담는다(v33.19 유해 요청 종류 판단용)."""
     if not messages:
         return None
     last = messages[-1]["content"]
@@ -491,6 +493,8 @@ async def classify_input(state: AppState, messages: List[Dict[str, str]], deadli
     obj = await state.llm.chat_json(_build_prompt(state, messages, None, focus_tail=TUTOR_CLS_FOCUS_TAIL), deadline)
     if obj is None:
         return None
+    if info is not None:
+        info["problems"] = _problems(obj)
     return _input_verdict(obj, last, rule_low_signal)[0]
 
 
